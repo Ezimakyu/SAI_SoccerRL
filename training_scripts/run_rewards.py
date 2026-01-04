@@ -1,4 +1,4 @@
-# balance_rewards.py
+# run_rewards.py
 import numpy as np
 import run_config as C
 
@@ -51,7 +51,6 @@ def calculate_reward(state, next_state, action, prev_action, qpos0):
     r_survival = C.SURVIVAL_W
 
     # Upright (Exponential Precision)
-    # Rewards being perfectly vertical (tilt=0) much more than being "kinda" vertical.
     r_upright = C.UPRIGHT_W * np.exp(-C.UPRIGHT_EXP_SCALE * tilt)
     if tilt > C.RECOVERY_TILT:
         r_upright *= C.UPRIGHT_BOOST_WHEN_TILTED
@@ -63,11 +62,13 @@ def calculate_reward(state, next_state, action, prev_action, qpos0):
         angvel_progress = (prev_ang_mag - ang_mag)
         r_progress = C.TILT_PROGRESS_W * float(tilt_progress) + C.ANGVEL_DAMP_W * float(angvel_progress)
 
-    # Early Reaction (Move fast if falling starts)
+    # ** FIX: Define vel_mag here so it is available for penalties later **
     vel_mag = float(np.linalg.norm(joint_qvel))
+
+    # [DISABLED] Early Reaction
     r_early = 0.0
-    if tilt < C.STABLE_TILT and ang_mag > C.EARLY_REACT_ANG_THRESH:
-        r_early = C.EARLY_REACT_W * vel_mag
+    # if tilt < C.STABLE_TILT and ang_mag > C.EARLY_REACT_ANG_THRESH:
+    #     r_early = C.EARLY_REACT_W * vel_mag
 
     # CoM Acceleration (Reverse direction)
     r_com = 0.0
@@ -89,49 +90,31 @@ def calculate_reward(state, next_state, action, prev_action, qpos0):
         all_vel_sq = float(np.sum(np.square(robot_qvel)))
         r_quiet = C.QUIET_STANCE_W * np.exp(-1.0 * all_vel_sq)
 
-    # Asymmetry
+    # [DISABLED] Asymmetry
     r_asym = 0.0
-    if fall_urgency_now > C.ASYM_URGENCY_THRESHOLD and action.shape[0] % 2 == 0:
-        half = action.shape[0] // 2
-        left = action[:half]
-        right = action[half:]
-        r_asym = C.ASYM_W * float(np.linalg.norm(left - right))
+    # if fall_urgency_now > C.ASYM_URGENCY_THRESHOLD and action.shape[0] % 2 == 0:
+    #     half = action.shape[0] // 2
+    #     left = action[:half]
+    #     right = action[half:]
+    #     r_asym = C.ASYM_W * float(np.linalg.norm(left - right))
 
-    # Base Widening (Feet moving apart when unstable)
+    # [DISABLED] Base Widening
     r_base = 0.0
-    if tilt > C.STABLE_TILT:
-        # Calculate raw velocity magnitude of legs (indices 6+ in qvel)
-        leg_vel_mag = float(np.linalg.norm(robot_qvel[6:]))
-        
-        # Apply weight
-        raw_base_reward = C.BASE_WIDENING_W * leg_vel_mag
-        
-        # CRITICAL: Clamp the reward to prevent vibration hacking
-        r_base = min(0.5, raw_base_reward)
+    # if tilt > C.STABLE_TILT:
+    #     leg_vel_mag = float(np.linalg.norm(robot_qvel[6:]))
+    #     raw_base_reward = C.BASE_WIDENING_W * leg_vel_mag
+    #     r_base = min(0.5, raw_base_reward)
 
-    # [NEW] Velocity Towards Ball Reward
-    # 1. Extract Vectors
-    # Indices 33:36 = robot linear velocity (local frame)
+    # Velocity Towards Ball Reward (The main driver for movement)
     vel_vec = next_state[33:36]
-    
-    # Indices 48:51 = ball position relative to robot (local frame)
-    # This vector points FROM robot TO ball.
     ball_vec = next_state[48:51]
     
-    # 2. Normalize ball vector to get direction
     dist_to_ball = float(np.linalg.norm(ball_vec))
-    # Add epsilon to prevent div by zero if we are ON the ball
     ball_dir = ball_vec / (dist_to_ball + 1e-6)
     
-    # 3. Calculate velocity component in that direction (Dot Product)
-    # If aligned: positive. If moving away: negative.
     vel_towards_ball = float(np.dot(vel_vec, ball_dir))
-    
-    # 4. Reward Logic
-    # Clamp speed so it doesn't sprint uncontrollably (e.g., > 1.5 m/s)
     rewardable_vel = min(vel_towards_ball, C.TARGET_RUN_SPEED)
     
-    # Only reward positive progress (moving closer)
     r_run = C.RUN_VEL_W * max(0.0, rewardable_vel)
 
     # --- 2. Penalties (Costs) ---
@@ -139,7 +122,7 @@ def calculate_reward(state, next_state, action, prev_action, qpos0):
     # Drift
     c_drift = C.DRIFT_W * float(np.sum(np.square(base_lin_vel[:2])))
 
-    # Joint Velocity
+    # Joint Velocity (Uses vel_mag defined above)
     excess_vel = max(0.0, vel_mag - C.VEL_THRESHOLD)
     c_vel = min(1.0, C.VEL_W * (excess_vel**2))
 
@@ -158,22 +141,18 @@ def calculate_reward(state, next_state, action, prev_action, qpos0):
     c_knee_hyper = 0.0
     for i in C.KNEE_LOCAL_IDXS:
         if 0 <= i < joint_pos.shape[0]:
-            # Squared penalty grows fast, but weight needs to be high
             excess = max(0.0, float(joint_pos[i]) - C.KNEE_MAX_PREF)
             c_knee_hyper += excess**2
-    c_knee_hyper = min(2.0, C.KNEE_HYPER_W * c_knee_hyper) # Allow higher max penalty
+    c_knee_hyper = min(2.0, C.KNEE_HYPER_W * c_knee_hyper)
 
-    # [NEW] Anti-Squat Penalty (Double Knee Bend)
-    # Check if BOTH knees are bent beyond threshold
+    # Anti-Squat Penalty
     c_squat = 0.0
     if len(C.KNEE_LOCAL_IDXS) >= 2:
-        # Assuming index 0 is left, 1 is right in the config list
         k1_idx, k2_idx = C.KNEE_LOCAL_IDXS[0], C.KNEE_LOCAL_IDXS[1]
         k1_pos = float(joint_pos[k1_idx])
         k2_pos = float(joint_pos[k2_idx])
         
         if k1_pos > C.DOUBLE_KNEE_BEND_THRESHOLD and k2_pos > C.DOUBLE_KNEE_BEND_THRESHOLD:
-            # Penalize the magnitude of the bend
             excess_squat = (k1_pos - C.DOUBLE_KNEE_BEND_THRESHOLD) + (k2_pos - C.DOUBLE_KNEE_BEND_THRESHOLD)
             c_squat = C.DOUBLE_KNEE_BEND_W * (excess_squat ** 2)
 
@@ -190,35 +169,26 @@ def calculate_reward(state, next_state, action, prev_action, qpos0):
     c_hip_stab = 0.0
     if robot_qvel.shape[0] >= 12:
         ankle_vels = robot_qvel[C.ANKLE_LOCAL_IDXS]
-        # raw calculation
         raw_ankle_cost = C.ANKLE_STAB_W * float(np.sum(np.square(ankle_vels)))
-        # CLAMPING: Penalty cannot exceed 1.0 per step
         c_ankle_stab = min(1.0, raw_ankle_cost)
         
         hip_vels = robot_qvel[C.HIP_PITCH_IDXS]
         raw_hip_cost = C.HIP_STAB_W * float(np.sum(np.square(hip_vels)))
-        # CLAMPING
         c_hip_stab = min(1.0, raw_hip_cost)
         
-        # Unlock slightly during high urgency
         if tilt >= C.STABLE_TILT:
              c_ankle_stab *= C.ANKLE_EMERGENCY_SCALE
              c_hip_stab *= C.ANKLE_EMERGENCY_SCALE
     
-    # [NEW] Leg Lift Penalty (Anti-Stork)
-    # Penalize Hip Pitch if it exceeds the threshold (lifting leg too high)
-    # Indices 0 and 6 are Hip Pitch
+    # Leg Lift Penalty (Anti-Stork)
     c_leg_lift = 0.0
     for i in C.LEG_LIFT_IDX:
         if 0 <= i < joint_pos.shape[0]:
-            # Usually positive hip pitch = lifting leg up. Check sign in your sim, 
-            # but abs() is safer to prevent backward kicks too.
             excess_lift = max(0.0, abs(float(joint_pos[i])) - C.LEG_LIFT_THRESHOLD)
             c_leg_lift += excess_lift ** 2
     c_leg_lift = C.LEG_LIFT_W * c_leg_lift
 
-    # [NEW] Leg Twist Penalty (Anti-Twist)
-    # Penalize Hip Yaw (indices 2 and 8)
+    # Leg Twist Penalty (Anti-Twist)
     c_leg_twist = 0.0
     for i in C.LEG_TWIST_IDX:
         if 0 <= i < joint_pos.shape[0]:
@@ -234,11 +204,9 @@ def calculate_reward(state, next_state, action, prev_action, qpos0):
         c_pose *= C.POSE_RECOVERY_SCALE
         c_knee *= 0.2
         c_knee_hyper *= 0.2
-        # Unlock stabilizers during emergency
         c_ankle_stab *= C.ANKLE_EMERGENCY_SCALE
         c_hip_stab *= C.ANKLE_EMERGENCY_SCALE
 
-    # Apply urgency scaling to all motion penalties
     c_vel *= penalty_scale
     c_ang_acc *= penalty_scale
     c_ctrl *= penalty_scale
@@ -268,7 +236,6 @@ def calculate_reward(state, next_state, action, prev_action, qpos0):
         )
 
     # --- 5. Stats for Logging ---
-    # We populate this dict so the main loop can accumulate it easily
     stats = {
         "survival": r_survival,
         "base_widening": r_base,

@@ -1,7 +1,7 @@
 
 # Visualize stand: python visualize.py
 # Visualize balance: python visualize.py --model_type sac --model_path training_scripts/balance_models/sac_balance_checkpoint.pth --policy_clip 0.35
-
+# Visualize run: python visualize.py --model_type sac --model_path training_scripts/run_models/sac_run_checkpoint.pth
 
 import torch
 import torch.nn.functional as F

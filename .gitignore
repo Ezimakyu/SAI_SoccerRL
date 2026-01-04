@@ -213,3 +213,4 @@ __marimo__/
 
 training_scripts/balance_models/
 training_scripts/run_models/
+wandb/

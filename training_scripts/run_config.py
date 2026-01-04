@@ -37,7 +37,7 @@ EARLY_REACT_ANG_THRESH = 0.2
 COM_ACCEL_W = 0.1
 PUSH_UP_W = 0.2
 QUIET_STANCE_W = 0.5
-BASE_WIDENING_W = 1.0
+BASE_WIDENING_W = 0.5
 
 # --- PENALTY WEIGHTS ---
 VEL_THRESHOLD = 3.0
@@ -70,7 +70,7 @@ ANKLE_EMERGENCY_SCALE = 0.1
 # Penalize lifting the thigh too high (Hip Pitch)
 # Threshold 0.5 rad is approx 28 degrees. Enough to step, but penalizes high marching.
 LEG_LIFT_IDX = [0, 6]  # Left Hip Pitch, Right Hip Pitch
-LEG_LIFT_THRESHOLD = 0.5
+LEG_LIFT_THRESHOLD = 0.8
 LEG_LIFT_W = 2.0  # Strong penalty
 
 # Penalize twisting the leg (Hip Yaw) - this stops the "helicopter" recovery
@@ -94,7 +94,7 @@ FALL_TILT = 0.65
 DRIFT_SPEED_XY = 2.0
 
 # --- ASYMMETRY ---
-ASYM_W = 0.0
+ASYM_W = 0.1
 ASYM_URGENCY_THRESHOLD = 1.0
 
 # --- LOGGING ---
