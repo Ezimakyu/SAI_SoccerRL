@@ -28,14 +28,14 @@ DT = 0.02
 
 # --- REWARD WEIGHTS ---
 SURVIVAL_W = 2.5
-UPRIGHT_W = 2.0
-UPRIGHT_EXP_SCALE = 5.0
+UPRIGHT_W = 0.5
+UPRIGHT_EXP_SCALE = 0.1
 TILT_PROGRESS_W = 1.0
 ANGVEL_DAMP_W = 0.2
 EARLY_REACT_W = 0.02
 EARLY_REACT_ANG_THRESH = 0.2
 COM_ACCEL_W = 0.1
-PUSH_UP_W = 0.2
+PUSH_UP_W = 0.1
 QUIET_STANCE_W = 0.5
 BASE_WIDENING_W = 0.5
 
@@ -70,8 +70,8 @@ ANKLE_EMERGENCY_SCALE = 0.1
 # Penalize lifting the thigh too high (Hip Pitch)
 # Threshold 0.5 rad is approx 28 degrees. Enough to step, but penalizes high marching.
 LEG_LIFT_IDX = [0, 6]  # Left Hip Pitch, Right Hip Pitch
-LEG_LIFT_THRESHOLD = 0.8
-LEG_LIFT_W = 2.0  # Strong penalty
+LEG_LIFT_THRESHOLD = 1.0
+LEG_LIFT_W = 0.5 
 
 # Penalize twisting the leg (Hip Yaw) - this stops the "helicopter" recovery
 # Threshold 0.2 rad is approx 11 degrees.
@@ -82,12 +82,39 @@ LEG_TWIST_W = 1.0
 # [NEW] RUNNING REWARDS
 # Reward forward velocity (X-axis).
 # 1.0 means at 1m/s it gets +1.0 reward per step.
-RUN_VEL_W = 2.0  
+RUN_VEL_W = 6.0
 TARGET_RUN_SPEED = 1.5  # Cap reward at this speed (m/s) so it doesn't sprint uncontrollably
 
 # Penalize bending both knees simultaneously (squatting)
-DOUBLE_KNEE_BEND_THRESHOLD = 0.6  # approx 35 degrees
-DOUBLE_KNEE_BEND_W = 2.0
+DOUBLE_KNEE_BEND_THRESHOLD = 0.8 # approx 45 degrees
+DOUBLE_KNEE_BEND_W = 0.5
+
+# --- GAIT / ALTERNATION CONFIG ---
+# Indices for calculating leg activity
+# Assuming based on your robot: 
+# Left Leg: Hip(0), Knee(3), Ankle(4,5) -> [0, 3, 4, 5]
+# Right Leg: Hip(6), Knee(9), Ankle(10,11) -> [6, 9, 10, 11]
+LEFT_LEG_IDXS = [0, 3, 4, 5]
+RIGHT_LEG_IDXS = [6, 9, 10, 11]
+
+# 1. Alternation (Velocity Asymmetry)
+# Reward for one leg moving fast while other is slow
+ALT_W = 0.1
+
+# 2. Scissor (Position Asymmetry) - NEW IDEA
+# Reward for splitting the legs (one forward, one back)
+# Uses Hip Pitch indices [0] and [6]
+SCISSOR_W = 1.0
+
+# 3. Double Support Penalty
+# Punish if both legs are moving fast (hopping) or both slow (standing)
+DOUBLE_SUPPORT_W = 0.2
+
+# 4. Velocity Gating
+# If leg velocity max is below this, running reward is crushed.
+WALK_ACT_THRESH = 1.0
+
+
 
 # --- TERMINATION ---
 FALL_TILT = 0.65

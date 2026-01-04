@@ -52,12 +52,26 @@ def train_run():
     print(f"[train_run] SAC device: {agent.device}")
     
     # Load PREVIOUS balance checkpoint if you have a good one (Optional but recommended)
-    # stand_ckpt_path = os.path.join(os.path.dirname(__file__), "balance_models", "sac_balance_best.pth")
-    # if os.path.exists(stand_ckpt_path):
-    #     print(f"[train_run] Loading balance checkpoint as base: {stand_ckpt_path}")
-    #     agent.load_state_dict(torch.load(stand_ckpt_path, map_location=agent.device))
+    resume_ckpt_path = os.path.join(os.path.dirname(__file__), "run_models", "sac_run_statue.pth")
+    if os.path.exists(resume_ckpt_path):
+        agent.load_state_dict(torch.load(resume_ckpt_path, map_location=agent.device))
+        
+        # 2. FORCE ENTROPY RESET (The "Re-Explore" Fix)
+        # Your SAC implementation stores alpha as a float.
+        # We reset it to a higher value (e.g., 0.1 or 0.2) to make the policy
+        # "curious" again, so it will try leaning forward to find the running reward.
+        target_reset_alpha = 0.2
+        
+        # Overwrite the internal variable
+        agent.alpha = target_reset_alpha
+        
+        # CRITICAL: Reset the decay step counter so it doesn't instantly decay back down
+        if hasattr(agent, '_update_steps'):
+            agent._update_steps = 0
+            
+        print(f"[train_run] *** ENTROPY RESET: Alpha forced to {agent.alpha} for re-exploration ***")
     # else:
-    print("[train_run] STARTING FRESH (No checkpoint loaded).")
+    # print("[train_run] STARTING FRESH (No checkpoint loaded).")
 
     replay_buffer = ReplayBuffer(C.REPLAY_SIZE)
     action_function = get_action_function(env.action_space)
