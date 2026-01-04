@@ -3,6 +3,17 @@ Teleoperate T1 robot in a gymnasium environment using a keyboard.
 """
 
 import argparse
+import sys
+import os
+
+# Add root to path so we can import sai_patch
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+try:
+    import sai_patch
+except ImportError:
+    print("Warning: sai_patch not found. Environment creation may fail.")
+
 import sai_mujoco  # noqa: F401
 import gymnasium as gym
 from se3_keyboard import Se3Keyboard, Se3Keyboard_Pynput

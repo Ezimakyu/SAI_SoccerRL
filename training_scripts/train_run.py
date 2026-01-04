@@ -1,4 +1,4 @@
-# train_balance.py
+# train_run.py
 import os
 import wandb
 from collections import deque, defaultdict
@@ -10,30 +10,28 @@ import sys
 # Allow importing from current directory
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# --- LOCAL IMPORTS ---
-import balance_config as C
-import balance_rewards as R
-from balance_utils import ReplayBuffer
+# --- CHANGED IMPORTS ---
+import run_config as C       # Points to run_config.py
+import run_rewards as R      # Points to run_rewards.py
+from balance_utils import ReplayBuffer # Re-use the utility class (no need to rename)
 from sac import SAC
 from main import Preprocessor, get_action_function, ENV_IDS, MultiTaskEnv
 
 # --- OPTIONAL: SAI IMPORTS ---
 try:
     import sai_mujoco
-    print("[train_balance] Imported sai_mujoco for local environment registration.")
+    print("[train_run] Imported sai_mujoco for local environment registration.")
 except ImportError:
     pass
 
 try:
     from sai_rl import SAIClient
-    # Only needed if you are using the remote SAI API
-    # sai = SAIClient(comp_id="...", api_key="...")
 except Exception as e:
-    print(f"[train_balance] Warning: SAIClient init failed (offline mode?): {e}")
+    print(f"[train_run] Warning: SAIClient init failed: {e}")
 
 
-def train_balance():
-    # 1. SETUP ENVIRONMENT & AGENT
+def train_run():
+    # 1. SETUP ENVIRONMENT
     env = MultiTaskEnv(ENV_IDS)
     preprocessor = Preprocessor()
     
@@ -51,13 +49,15 @@ def train_balance():
         device="mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"),
     )
     
-    print(f"[train_balance] SAC device: {agent.device}")
+    print(f"[train_run] SAC device: {agent.device}")
     
-    # Checkpoint loading (Optional)
-    stand_ckpt_path = os.path.join(os.path.dirname(__file__), "stand_models", "sac_stand_checkpoint.pth")
+    # Load PREVIOUS balance checkpoint if you have a good one (Optional but recommended)
+    # stand_ckpt_path = os.path.join(os.path.dirname(__file__), "balance_models", "sac_balance_best.pth")
     # if os.path.exists(stand_ckpt_path):
+    #     print(f"[train_run] Loading balance checkpoint as base: {stand_ckpt_path}")
     #     agent.load_state_dict(torch.load(stand_ckpt_path, map_location=agent.device))
-    print("[train_balance] STARTING FRESH (No checkpoint loaded).")
+    # else:
+    print("[train_run] STARTING FRESH (No checkpoint loaded).")
 
     replay_buffer = ReplayBuffer(C.REPLAY_SIZE)
     action_function = get_action_function(env.action_space)
@@ -65,15 +65,16 @@ def train_balance():
     # 2. LOGGING SETUP
     if C.USE_WANDB:
         wandb.init(
-            project="booster-balance", 
-            name="balance-modular",
+            project="booster-run",  # Changed project name
+            name="run-v1",
             config={k: v for k, v in vars(C).items() if not k.startswith('__')}
         )
 
-    model_dir = os.path.join(os.path.dirname(__file__), "balance_models")
+    # Changed save directory to 'run_models'
+    model_dir = os.path.join(os.path.dirname(__file__), "run_models")
     os.makedirs(model_dir, exist_ok=True)
 
-    # 3. TRAINING LOOP VARIABLES
+    # 3. TRAINING LOOP
     total_steps = 0
     episode_num = 0
     best_episode_reward = -float("inf")
@@ -83,7 +84,6 @@ def train_balance():
     pbar = tqdm(total=C.TIMESTEPS)
 
     while total_steps < C.TIMESTEPS:
-        # --- EPISODE START ---
         obs, info = env.reset()
         state = preprocessor.modify_state(obs, info).squeeze()
         
@@ -91,15 +91,10 @@ def train_balance():
         episode_steps = 0
         done = False
         
-        # Trackers for this episode
         episode_reward_stats = defaultdict(float)
         
-        # State vars for urgency/clipping logic
         qpos0 = state[:12].copy()
         prev_action = np.zeros(env.action_space.shape, dtype=np.float32)
-        
-        # Need to track previous velocity manually for the *urgency* calculation
-        # (The reward function tracks its own previous state, but we need urgency BEFORE step)
         prev_base_ang_vel = state[27:30].copy()
 
         while not done and total_steps < C.TIMESTEPS:
@@ -107,22 +102,18 @@ def train_balance():
             if total_steps < C.WARMUP_STEPS:
                 with torch.no_grad():
                     action = agent.select_action(state, evaluate=False)
-                # Add noise during warmup to avoid getting stuck
                 action = action + np.random.normal(0.0, 0.1, size=action.shape)
             else:
                 action = agent.select_action(state)
 
-            # Small constant noise
             if np.random.rand() < C.PERTURB_PROB:
                 action = action + np.random.normal(0.0, C.PERTURB_POLICY_STD, size=action.shape)
 
-            # B. DYNAMIC CLIPPING (URGENCY LOGIC)
-            # Calculate urgency based on CURRENT state to decide how much to clip the action
+            # B. DYNAMIC CLIPPING (URGENCY)
             cur_gravity = state[24:27]
             cur_tilt = float(np.linalg.norm(cur_gravity[:2]))
             cur_ang = state[27:30]
             
-            # Estimate acceleration for urgency
             ang_acc_est = float(np.linalg.norm(cur_ang - prev_base_ang_vel)) / C.DT
             
             fall_urgency_pre = float(np.clip(
@@ -132,14 +123,13 @@ def train_balance():
                 0.0, C.URGENCY_MAX
             ))
             
-            # If falling fast (high urgency), unlock the clip to allow larger movements
             dynamic_clip = float(C.POLICY_ACTION_CLIP + C.DYNAMIC_CLIP_W * fall_urgency_pre)
             dynamic_clip = min(dynamic_clip, 1.0)
 
             action = np.clip(action, -dynamic_clip, dynamic_clip)
             scaled_action = action_function(action)
             
-            # C. EXTERNAL DISTURBANCE (PHYSICS PUSH)
+            # C. EXTERNAL DISTURBANCE
             if np.random.rand() < C.PERTURB_PROB:
                 torque_std = C.PERTURB_TORQUE_STD_FRAC * (env.action_space.high - env.action_space.low)
                 scaled_action = scaled_action + np.random.normal(0.0, torque_std, size=scaled_action.shape)
@@ -149,12 +139,11 @@ def train_balance():
             next_obs, _, _, truncated, info = env.step(scaled_action)
             next_state = preprocessor.modify_state(next_obs, info).squeeze()
 
-            # E. REWARD CALCULATION (Uses balance_rewards.py)
+            # E. REWARD CALCULATION (Uses run_rewards.py)
             reward, terminated, reason, stats = R.calculate_reward(
                 state, next_state, action, prev_action, qpos0
             )
 
-            # Enforce max steps
             episode_steps += 1
             if episode_steps >= C.MAX_EPISODE_STEPS:
                 truncated = True
@@ -162,15 +151,12 @@ def train_balance():
             done = bool(terminated or truncated)
             episode_reward += float(reward)
 
-            # Accumulate debug stats
             if C.DEBUG_REWARDS:
                 for k, v in stats.items():
                     episode_reward_stats[k] += v
 
-            # F. BUFFER & UPDATES
             replay_buffer.push(state, action, reward, next_state, done)
             
-            # Update loop variables
             prev_action = action
             prev_base_ang_vel = cur_ang.copy()
             state = next_state
@@ -185,18 +171,16 @@ def train_balance():
                     for _ in range(C.UPDATES_PER_INTERVAL):
                         q_loss, pi_loss = agent.update(*replay_buffer.sample(C.BATCH_SIZE))
             
-            # Step-wise WandB (Optional)
             if C.USE_WANDB and total_steps > C.WARMUP_STEPS and total_steps % C.UPDATE_INTERVAL == 0:
                 wandb.log({
                    "train/q_loss": q_loss,
                    "train/pi_loss": pi_loss,
-                   "train/alpha": agent.alpha,
                 }, step=total_steps)
 
         # --- EPISODE END LOGIC ---
         episode_num += 1
         
-        # 1. Debug Print (Reward Breakdown)
+        # 1. Debug Print
         if C.DEBUG_REWARDS and (episode_num % C.DEBUG_PRINT_INTERVAL == 0):
             print(f"\n[DEBUG] Episode {episode_num} Reward Breakdown (Total: {episode_reward:.2f}):")
             sorted_stats = sorted(episode_reward_stats.items(), key=lambda x: abs(x[1]), reverse=True)
@@ -211,23 +195,24 @@ def train_balance():
 
         # 2. Stats Tracking
         recent_episode_rewards.append(episode_reward)
+        
         if len(recent_episode_rewards) > 0:
             r_min = float(np.min(recent_episode_rewards))
             r_median = float(np.median(recent_episode_rewards))
             r_avg = float(np.mean(recent_episode_rewards))
             r_max = float(np.max(recent_episode_rewards))
         else:
-            r_min = r_median = r_avg = r_max = episode_rewardavg_recent_reward = float(np.mean(recent_episode_rewards))
+            r_min = r_median = r_avg = r_max = episode_reward
 
-        # 3. Save Best Model
+        # 3. Save Best
         if episode_reward > best_episode_reward:
             best_episode_reward = episode_reward
-            torch.save(agent.state_dict(), os.path.join(model_dir, "sac_balance_best.pth"))
+            torch.save(agent.state_dict(), os.path.join(model_dir, "sac_run_best.pth"))
 
-        # 4. Periodic Console Log (Updated with Min/Med/Avg/Max)
+        # 4. Periodic Log
         if episode_num > 0 and (episode_num % C.LOG_EVERY_EPISODES == 0) and (episode_num != last_logged_episode):
             tqdm.write(
-                f"[balance] Ep {episode_num} | "
+                f"[run] Ep {episode_num} | "
                 f"Min: {r_min:6.2f} | "
                 f"Med: {r_median:6.2f} | "
                 f"Avg: {r_avg:6.2f} | "
@@ -243,20 +228,17 @@ def train_balance():
                     "episode/reward_max": r_max,
                     "episode/length": episode_steps,
                 }, step=total_steps)
-            
             last_logged_episode = episode_num
 
-        # 5. Periodic Checkpoint
         if episode_num % 50 == 0:
-            torch.save(agent.state_dict(), os.path.join(model_dir, "sac_balance_checkpoint.pth"))
+            torch.save(agent.state_dict(), os.path.join(model_dir, "sac_run_checkpoint.pth"))
 
-    # --- FINAL SAVE ---
-    torch.save(agent.state_dict(), os.path.join(model_dir, "sac_balance_final.pth"))
-    print("[train_balance] Training complete.")
+    torch.save(agent.state_dict(), os.path.join(model_dir, "sac_run_final.pth"))
+    print("[train_run] Training complete.")
     if C.USE_WANDB:
         wandb.finish()
     env.close()
 
 
 if __name__ == "__main__":
-    train_balance()
+    train_run()

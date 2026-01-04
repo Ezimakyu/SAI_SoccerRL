@@ -1,0 +1,65 @@
+_wandb:
+    value:
+        cli_version: 0.23.1
+        e:
+            der3mbgtynqo0w2oj9wv1g0abfcmydws:
+                apple:
+                    ecpuCores: 4
+                    gpuCores: 40
+                    memoryGb: 48
+                    name: Apple M4 Max
+                    pcpuCores: 12
+                    ramTotalBytes: "51539607552"
+                codePath: training_scripts/main_balance.py
+                codePathLocal: training_scripts/main_balance.py
+                cpu_count: 16
+                cpu_count_logical: 16
+                disk:
+                    /:
+                        total: "994662584320"
+                        used: "666280398848"
+                email: stephen.zhu.05@gmail.com
+                executable: /Users/steph/miniconda3/envs/sai_soccer/bin/python
+                git:
+                    commit: 6533cc9f0cc045baba24b859aa18b9b706e679a5
+                    remote: https://github.com/Ezimakyu/SAI_SoccerRL.git
+                host: vpnduopool-10-251-173-93.near.illinois.edu
+                memory:
+                    total: "51539607552"
+                os: macOS-15.2-arm64-arm-64bit
+                program: /Users/steph/Desktop/booster_soccer_showdown/./training_scripts/main_balance.py
+                python: CPython 3.11.14
+                root: /Users/steph/Desktop/booster_soccer_showdown
+                startedAt: "2026-01-04T02:01:41.525275Z"
+                writerId: der3mbgtynqo0w2oj9wv1g0abfcmydws
+        m: []
+        python_version: 3.11.14
+        t:
+            "1":
+                - 1
+            "2":
+                - 1
+            "3":
+                - 13
+                - 16
+                - 61
+            "4": 3.11.14
+            "5": 0.23.1
+            "12": 0.23.1
+            "13": darwin-arm64
+ankle_stab_w:
+    value: 0.5
+batch_size:
+    value: 256
+policy_clip:
+    value: 0.35
+push_up_w:
+    value: 0.2
+quiet_stance_w:
+    value: 0.5
+recovery_tilt:
+    value: 0.35
+stable_tilt:
+    value: 0.15
+timesteps:
+    value: 400000

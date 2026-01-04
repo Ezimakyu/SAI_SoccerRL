@@ -210,3 +210,6 @@ __marimo__/
 /data/
 /aux/
 /imitation_learning/exp
+
+training_scripts/balance_models/
+training_scripts/run_models/

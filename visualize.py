@@ -1,6 +1,6 @@
 
 # Visualize stand: python visualize.py
-# Visualize balance: python visualize.py --model_type sac --model_path training_scripts/balance_models/sac_balance_best.pth --policy_clip 0.35
+# Visualize balance: python visualize.py --model_type sac --model_path training_scripts/balance_models/sac_balance_checkpoint.pth --policy_clip 0.35
 
 
 import torch
@@ -15,7 +15,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'training_scripts'))
 
 from sai_rl import SAIClient
-from training_scripts.td3 import TD3
+# from training_scripts.td3 import TD3
 from sac import SAC
 from training_scripts.main import Preprocessor, get_action_function, ENV_IDS
 
@@ -23,15 +23,15 @@ import argparse
 
 # Configuration
 # Defaults
-DEFAULT_MODEL_PATH = "training_scripts/stand_models/sac_stand_checkpoint.pth"
+DEFAULT_MODEL_PATH = "training_scripts/stand_models/sac_balance_checkpoint.pth"
 DEFAULT_MODEL_TYPE = "sac" 
 DEFAULT_TASK_INDEX = 0
-DEFAULT_POLICY_CLIP = 0.25
+DEFAULT_POLICY_CLIP = 0.35
 
 def visualize():
     parser = argparse.ArgumentParser(description="Visualize Trained Policy")
     parser.add_argument("--model_path", type=str, default=DEFAULT_MODEL_PATH, help="Path to model checkpoint")
-    parser.add_argument("--model_type", type=str, default=DEFAULT_MODEL_TYPE, choices=["sac", "td3"], help="Model type: sac or td3")
+    parser.add_argument("--model_type", type=str, default=DEFAULT_MODEL_TYPE, choices=["sac"], help="Model type: sac")
     parser.add_argument("--task_index", type=int, default=DEFAULT_TASK_INDEX, help="Task index (0-2)")
     parser.add_argument(
         "--policy_clip",
@@ -103,16 +103,16 @@ def visualize():
                 device=device,
             )
             print(f"[visualize] SAC device: {model.device}")
-        elif MODEL_TYPE.lower() == "td3":
-            model = TD3(
-                n_features=n_features,
-                action_space=env.action_space,
-                neurons=[400, 300],
-                activation_function=F.relu,
-                learning_rate=0.0001,
-            )
+        # elif MODEL_TYPE.lower() == "td3":
+        #     model = TD3(
+        #         n_features=n_features,
+        #         action_space=env.action_space,
+        #         neurons=[400, 300],
+        #         activation_function=F.relu,
+        #         learning_rate=0.0001,
+        #     )
         else:
-            raise ValueError(f"Unknown MODEL_TYPE={MODEL_TYPE!r}. Use 'sac' or 'td3'.")
+            raise ValueError(f"Unknown MODEL_TYPE={MODEL_TYPE!r}. Use 'sac'.")
 
         # 4. Load Weights
         print(f"Loading weights from {MODEL_PATH}")

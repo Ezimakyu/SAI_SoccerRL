@@ -1,0 +1,36 @@
+{
+  "os": "macOS-15.2-arm64-arm-64bit",
+  "python": "CPython 3.11.14",
+  "startedAt": "2026-01-04T01:41:37.552037Z",
+  "program": "/Users/steph/Desktop/booster_soccer_showdown/./training_scripts/main_balance.py",
+  "codePath": "training_scripts/main_balance.py",
+  "codePathLocal": "training_scripts/main_balance.py",
+  "git": {
+    "remote": "https://github.com/Ezimakyu/SAI_SoccerRL.git",
+    "commit": "c8e7f0870bb9122103efc591090cb31264b96bae"
+  },
+  "email": "stephen.zhu.05@gmail.com",
+  "root": "/Users/steph/Desktop/booster_soccer_showdown",
+  "host": "vpnduopool-10-251-173-93.near.illinois.edu",
+  "executable": "/Users/steph/miniconda3/envs/sai_soccer/bin/python",
+  "cpu_count": 16,
+  "cpu_count_logical": 16,
+  "disk": {
+    "/": {
+      "total": "994662584320",
+      "used": "666217422848"
+    }
+  },
+  "memory": {
+    "total": "51539607552"
+  },
+  "apple": {
+    "name": "Apple M4 Max",
+    "ecpuCores": 4,
+    "pcpuCores": 12,
+    "gpuCores": 40,
+    "memoryGb": 48,
+    "ramTotalBytes": "51539607552"
+  },
+  "writerId": "7keboedqan2dhoncdw8j86mq98uaqtd2"
+}

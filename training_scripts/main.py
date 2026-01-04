@@ -58,7 +58,6 @@ class MultiTaskEnv(gym.Env):
 # Moved to main execution block
 
 class Preprocessor():
-
     def get_task_onehot(self, info):
         idx = info.get('task_index', None)
         
@@ -70,12 +69,10 @@ class Preprocessor():
             else:
                 idx = 0 # LowerT1GoaliePenaltyKick-v0 (Default)
 
-        # Handle 0-d array/scalar nuances
         if hasattr(idx, 'item'):
              idx = idx.item() if np.ndim(idx) == 0 else (idx[0] if len(idx) > 0 else 0)
         
         vec = np.zeros(3)
-        # Ensure idx is within bounds [0, 2]
         safe_idx = int(idx)
         if 0 <= safe_idx < 3:
             vec[safe_idx] = 1.0
@@ -91,18 +88,15 @@ class Preprocessor():
 
     def safe_get(self, info, key, target_len):
         val = np.zeros((1, target_len)) 
-        
         if key in info:
             data = info[key]
             data = np.array(data).flatten()
             current_len = len(data)
             limit = min(target_len, current_len)
             val[0, :limit] = data[:limit]
-            
         return val
 
     def modify_state(self, obs, info):
-        
         if len(obs.shape) == 1:
             obs = np.expand_dims(obs, axis=0)
 
@@ -110,58 +104,71 @@ class Preprocessor():
         if len(task_onehot.shape) == 1:
             task_onehot = np.expand_dims(task_onehot, axis=0)
         
-        # Always present keys (assuming base robot/ball/goal are in all)
-        if len(info["robot_quat"].shape) == 1:
-            info["robot_quat"] = np.expand_dims(info["robot_quat"], axis = 0)
-            info["robot_gyro"] = np.expand_dims(info["robot_gyro"], axis = 0)
-            info["robot_accelerometer"] = np.expand_dims(info["robot_accelerometer"], axis = 0)
-            info["robot_velocimeter"] = np.expand_dims(info["robot_velocimeter"], axis = 0)
-            info["goal_team_0_rel_robot"] = np.expand_dims(info["goal_team_0_rel_robot"], axis = 0)
-            info["goal_team_1_rel_robot"] = np.expand_dims(info["goal_team_1_rel_robot"], axis = 0)
-            info["goal_team_0_rel_ball"] = np.expand_dims(info["goal_team_0_rel_ball"], axis = 0)
-            info["goal_team_1_rel_ball"] = np.expand_dims(info["goal_team_1_rel_ball"], axis = 0)
-            info["ball_xpos_rel_robot"] = np.expand_dims(info["ball_xpos_rel_robot"], axis = 0) 
-            info["ball_velp_rel_robot"] = np.expand_dims(info["ball_velp_rel_robot"], axis = 0) 
-            info["ball_velr_rel_robot"] = np.expand_dims(info["ball_velr_rel_robot"], axis = 0) 
-            info["player_team"] = np.expand_dims(info["player_team"], axis = 0)
+        # Ensure dimensions for always-present keys
+        keys_to_expand = [
+            "robot_quat", "robot_gyro", "robot_accelerometer", "robot_velocimeter",
+            "goal_team_0_rel_robot", "goal_team_1_rel_robot",
+            "goal_team_0_rel_ball", "goal_team_1_rel_ball",
+            "ball_xpos_rel_robot", "ball_velp_rel_robot", "ball_velr_rel_robot",
+            "player_team"
+        ]
+        for k in keys_to_expand:
+            if k in info and len(info[k].shape) == 1:
+                info[k] = np.expand_dims(info[k], axis=0)
 
-        # Variable keys with safe_get
+        # Variable keys
         goalkeeper_0_xpos = self.safe_get(info, "goalkeeper_team_0_xpos_rel_robot", 3)
         goalkeeper_0_velp = self.safe_get(info, "goalkeeper_team_0_velp_rel_robot", 3)
         goalkeeper_1_xpos = self.safe_get(info, "goalkeeper_team_1_xpos_rel_robot", 3)
         goalkeeper_1_velp = self.safe_get(info, "goalkeeper_team_1_velp_rel_robot", 3)
         target_xpos = self.safe_get(info, "target_xpos_rel_robot", 3)
         target_velp = self.safe_get(info, "target_velp_rel_robot", 3)
-        defender_xpos = self.safe_get(info, "defender_xpos", 8) # Assuming 8 based on previous n_features=87 logic
+        defender_xpos = self.safe_get(info, "defender_xpos", 8)
 
+        # Core State Extraction
         robot_qpos = obs[:,:12]
         robot_qvel = obs[:,12:24]
         quat = info["robot_quat"]
         base_ang_vel = info["robot_gyro"]
         project_gravity = self.quat_rotate_inverse(quat, np.array([0.0, 0.0, -1.0]))
         
-        obs = np.hstack((robot_qpos, 
-                         robot_qvel,
-                         project_gravity,
-                         base_ang_vel,
-                         info["robot_accelerometer"],
-                         info["robot_velocimeter"],
-                         info["goal_team_0_rel_robot"], 
-                         info["goal_team_1_rel_robot"], 
-                         info["goal_team_0_rel_ball"], 
-                         info["goal_team_1_rel_ball"], 
-                         info["ball_xpos_rel_robot"], 
-                         info["ball_velp_rel_robot"], 
-                         info["ball_velr_rel_robot"], 
-                         info["player_team"], 
-                         goalkeeper_0_xpos, 
-                         goalkeeper_0_velp, 
-                         goalkeeper_1_xpos, 
-                         goalkeeper_1_velp, 
-                         target_xpos, 
-                         target_velp, 
-                         defender_xpos,
-                         task_onehot))
+        # Stack Construction (CRITICAL FOR INDICES)
+        # 0-12: qpos
+        # 12-24: qvel
+        # 24-27: grav
+        # 27-30: gyro
+        # 30-33: accel
+        # 33-36: velocimeter  <-- ROBOT VELOCITY
+        # 36-39: goal0 rel robot
+        # 39-42: goal1 rel robot
+        # 42-45: goal0 rel ball
+        # 45-48: goal1 rel ball
+        # 48-51: ball rel robot <-- TARGET VECTOR
+        
+        obs = np.hstack((
+            robot_qpos, 
+            robot_qvel,
+            project_gravity,
+            base_ang_vel,
+            info["robot_accelerometer"],
+            info["robot_velocimeter"],
+            info["goal_team_0_rel_robot"], 
+            info["goal_team_1_rel_robot"], 
+            info["goal_team_0_rel_ball"], 
+            info["goal_team_1_rel_ball"], 
+            info["ball_xpos_rel_robot"], 
+            info["ball_velp_rel_robot"], 
+            info["ball_velr_rel_robot"], 
+            info["player_team"], 
+            goalkeeper_0_xpos, 
+            goalkeeper_0_velp, 
+            goalkeeper_1_xpos, 
+            goalkeeper_1_velp, 
+            target_xpos, 
+            target_velp, 
+            defender_xpos,
+            task_onehot
+        ))
 
         return obs
 

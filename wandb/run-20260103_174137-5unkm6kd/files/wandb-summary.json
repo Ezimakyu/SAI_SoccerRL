@@ -1,0 +1,1 @@
+{"episode/reward":46816.52355027602,"_runtime":209.272289417,"_timestamp":1.767491106494057e+09,"train/q_loss":2.1836325e+06,"train/alpha":0.01,"_wandb":{"runtime":209},"_step":28100,"episode/length":99,"episode/avg_reward":69713.73531473357,"episode/best_reward":120469.99317604817,"train/pi_loss":-19963.3515625}
