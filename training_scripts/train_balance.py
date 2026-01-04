@@ -1,10 +1,16 @@
 import os
 import random
+import wandb
 from collections import deque
 
 import numpy as np
 import torch
 from tqdm import tqdm
+
+import sys
+
+# Allow importing from current directory when running as script
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from sac import SAC
 from main import Preprocessor, get_action_function, ENV_IDS, MultiTaskEnv
@@ -34,6 +40,9 @@ TIMESTEPS = 400_000
 BATCH_SIZE = 256
 REPLAY_SIZE = 1_000_000
 MAX_EPISODE_STEPS = 300  # shorter episodes encourage frequent falls + recovery learning
+WARMUP_STEPS = 10_000
+UPDATE_INTERVAL = 50       # Run gradient updates every N steps
+UPDATES_PER_INTERVAL = 50  # Number of gradient updates to run per interval
 
 # Policy-space action handling (should be consistent with visualization)
 POLICY_ACTION_CLIP = 0.35
@@ -98,17 +107,32 @@ ANG_ACC_W = 0.05
 # Previously we sliced state[7:12] which made Index 9 appear as local index 2.
 # Now we use the full state[0:12] and target indices [3, 9].
 KNEE_LOCAL_IDXS = [3, 9]     # Left Knee, Right Knee
-KNEE_REST_ANGLE = 0.5        # slightly bent (tune 0.3–0.8 after visualization)
-KNEE_W = 0.02
+KNEE_REST_ANGLE = 0.25       # straighter (was 0.5)
+KNEE_W = 0.05                # stronger bias (was 0.02)
 
 # Prevent "one knee absorbs everything" solutions (hard hyper-flexion)
 KNEE_MAX_PREF = 1.2       # radians; above this gets penalized (tune 1.0–1.6)
 KNEE_HYPER_W = 0.10
 
+# Push up reward: encourage extending knees when bent
+PUSH_UP_W = 0.2
+
+# Ankle stiffness/damping reward to prevent flailing
+# Indices for Ankles (Pitch/Roll)
+# Left: 4, 5; Right: 10, 11
+ANKLE_LOCAL_IDXS = [4, 5, 10, 11]
+# ANKLE_STAB_W = 0.1  # Penalize high velocity in ankles specifically
+# ANKLE_EMERGENCY_SCALE = 0.1  # How much to relax stabilization during emergency (0.0=free, 1.0=same)
+
+# Emergency Step Reward: Reward rapid leg motion ONLY when falling fast
+# EMERGENCY_STEP_W = 0.05
+# EMERGENCY_ANG_VEL_THRESH = 1.5
+
 # Knee index probe (recommended once to identify which joint_pos indices correspond to knees)
 KNEE_PROBE = True
 KNEE_PROBE_EPISODES = 5
 KNEE_PROBE_PRINT_EVERY_STEPS = 0  # 0 disables per-step prints; set e.g. 25 if you want
+
 
 # Termination
 FALL_TILT = 0.65
@@ -181,6 +205,22 @@ def train_balance():
     replay_buffer = ReplayBuffer(REPLAY_SIZE)
     action_function = get_action_function(env.action_space)
 
+    # Initialize WandB
+    wandb.init(
+        project="booster-balance",
+        name="balance-recovery",
+        config={
+            "timesteps": TIMESTEPS,
+            "batch_size": BATCH_SIZE,
+            "policy_clip": POLICY_ACTION_CLIP,
+            "stable_tilt": STABLE_TILT,
+            "recovery_tilt": RECOVERY_TILT,
+            "push_up_w": PUSH_UP_W,
+            # "ankle_stab_w": ANKLE_STAB_W,
+            # "emergency_step_w": EMERGENCY_STEP_W,
+        }
+    )
+
     total_steps = 0
     episode_num = 0
     best_episode_reward = -float("inf")
@@ -216,7 +256,7 @@ def train_balance():
 
         while not done and total_steps < TIMESTEPS:
             # Policy-space action in [-1, 1]
-            if total_steps < 10_000:
+            if total_steps < WARMUP_STEPS:
                 # FIX: Use the agent's policy even during warmup, just with more noise
                 # This fills buffer with "standing-like" data, not random spasms.
                 with torch.no_grad():
@@ -374,6 +414,36 @@ def train_balance():
                  # If dot_prod is negative, we reversed.
                  com_accel_reward = COM_ACCEL_W * max(0.0, -dot_prod)
 
+            # Push up reward: if knees are bent, reward extending them (negative velocity)
+            push_up_reward = 0.0
+            # joint_pos/robot_qvel are 12-dim arrays
+            avg_knee_pos = float(np.mean(joint_pos[KNEE_LOCAL_IDXS]))
+            if avg_knee_pos > 0.35:  # If bent significantly
+                avg_knee_vel = float(np.mean(robot_qvel[KNEE_LOCAL_IDXS]))
+                # Positive angle = flexion, so negative velocity = extension
+                if avg_knee_vel < 0:
+                    push_up_reward = PUSH_UP_W * (-avg_knee_vel)
+
+            # Ankle Stabilization: penalize high velocity in ankles to prevent "flailing"
+            # We want them to act as a solid base, not loose appendages.
+            ankle_stab_cost = 0.0
+            emergency_step_reward = 0.0
+            
+            # if robot_qvel.shape[0] >= 12:
+            #     ankle_vels = robot_qvel[ANKLE_LOCAL_IDXS]
+            #     ankle_stab_cost = ANKLE_STAB_W * float(np.sum(np.square(ankle_vels)))
+            #     
+            #     # Unlock ankles slightly during high urgency to allow stepping/balance recovery
+            #     if tilt >= STABLE_TILT:
+            #          ankle_stab_cost *= ANKLE_EMERGENCY_SCALE
+            #
+            #     # Emergency Step Reward: If falling fast (high angular velocity), reward leg velocity 
+            #     # to encourage a quick step/reaction.
+            #     if ang_mag > EMERGENCY_ANG_VEL_THRESH:
+            #         # Sum of squared velocities of all leg joints
+            #         leg_vel_sq = float(np.sum(np.square(robot_qvel[0:12])))
+            #         emergency_step_reward = EMERGENCY_STEP_W * leg_vel_sq
+
             # Termination (tilt/drift)
             termination_reason = None
             if tilt > FALL_TILT:
@@ -400,6 +470,8 @@ def train_balance():
                     + progress_reward
                     + early_react_reward
                     + com_accel_reward
+                    + push_up_reward
+                    + emergency_step_reward
                     - drift_cost
                     - vel_cost
                     - ang_acc_cost
@@ -408,6 +480,7 @@ def train_balance():
                     - pose_cost
                     - ctrl_cost
                     - smooth_cost
+                    - ankle_stab_cost
                 )
 
             # Enforce shorter episodes
@@ -424,8 +497,25 @@ def train_balance():
             total_steps += 1
             pbar.update(1)
 
-            if len(replay_buffer) > BATCH_SIZE:
-                agent.update(*replay_buffer.sample(BATCH_SIZE))
+            # Optimizing: Batch updates to reduce Python/MPS context switching overhead
+            # Only start training after warmup
+            q_loss = 0.0
+            pi_loss = 0.0
+            if total_steps > WARMUP_STEPS and len(replay_buffer) > BATCH_SIZE:
+                if total_steps % UPDATE_INTERVAL == 0:
+                    for _ in range(UPDATES_PER_INTERVAL):
+                        q_loss, pi_loss = agent.update(*replay_buffer.sample(BATCH_SIZE))
+            
+            # WandB logging (step-wise, but maybe throttle to avoid overhead)
+            # Log every UPDATE_INTERVAL steps when we actually update?
+            # Or just rely on the episode loop for main metrics. 
+            # We can log losses if they were updated.
+            if total_steps > WARMUP_STEPS and total_steps % UPDATE_INTERVAL == 0:
+                wandb.log({
+                   "train/q_loss": q_loss,
+                   "train/pi_loss": pi_loss,
+                   "train/alpha": agent.alpha,
+                }, step=total_steps)
 
         episode_num += 1
 
@@ -465,6 +555,12 @@ def train_balance():
                 f"EpSteps: {episode_steps} | "
                 f"TotalSteps: {total_steps}"
             )
+            wandb.log({
+                "episode/reward": episode_reward,
+                "episode/length": episode_steps,
+                "episode/avg_reward": avg_recent_reward,
+                "episode/best_reward": best_episode_reward,
+            }, step=total_steps)
             last_logged_episode = episode_num
 
         # Periodic checkpoint
@@ -473,6 +569,7 @@ def train_balance():
 
     torch.save(agent.state_dict(), os.path.join(model_dir, "sac_balance_final.pth"))
     print("[train_balance] Training complete.")
+    wandb.finish()
     env.close()
 
 

@@ -4,7 +4,20 @@ import gymnasium as gym
 
 from sai_rl import SAIClient
 
-from td3 import TD3
+import sys
+import os
+
+# Add root directory to path to find sai_patch
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# Allow importing from current directory when running as script
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+try:
+    import sai_patch
+except ImportError:
+    pass
+
+from sac import SAC
 from training import training_loop
 
 # Define environment IDs for the 3 tasks
@@ -195,13 +208,13 @@ if __name__ == "__main__":
     print(f"Calculated Input Features: {REAL_N_FEATURES}")
 
     # Create the model
-    model = TD3(
-        n_features=REAL_N_FEATURES,  
-        action_space=env.action_space, 
-        neurons=[400, 300], 
-        activation_function=F.relu,
-        learning_rate=0.0001,
-    )
+    # model = SAC(
+    #     n_features=REAL_N_FEATURES,  
+    #     action_space=env.action_space, 
+    #     neurons=[400, 300], 
+    #     activation_function=F.relu,
+    #     learning_rate=0.0001,
+    # )
 
     # Create action function closure
     action_function = get_action_function(env.action_space)
