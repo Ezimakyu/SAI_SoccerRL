@@ -73,7 +73,7 @@ def visualize():
     # Use sai.make_env for convenience as it handles render modes and registration well
     # Or use gym.make(env_name, render_mode=RENDER_MODE) if registered
     env = gym.make(env_name, render_mode=RENDER_MODE)
-    action_function = get_action_function(env.action_space)
+    action_function = get_action_function()
 
     # 2. Initialize Preprocessor
     preprocessor = Preprocessor()

@@ -22,7 +22,7 @@ class GaussianPolicy(nn.Module):
         in_dim = n_features
         for i, out_dim in enumerate(neurons):
             self.base_net.add_module(f"linear_{i}", nn.Linear(in_dim, out_dim))
-            self.base_net.add_module(f"activation_{i}", nn.ReLU()) # Simplified for clarity
+            self.base_net.add_module(f"activation_{i}", nn.ReLU())
             in_dim = out_dim
             
         self.mean_linear = nn.Linear(in_dim, n_actions)
@@ -31,27 +31,36 @@ class GaussianPolicy(nn.Module):
         self.log_std_max = float(log_std_max)
         
     def forward(self, state):
+        # This remains standard for SAC logic
         x = self.base_net(state)
         mean = self.mean_linear(x)
         log_std = self.log_std_linear(x)
         log_std = torch.clamp(log_std, min=self.log_std_min, max=self.log_std_max)
         return mean, log_std
 
+    # NEW: Clean inference method for TorchScript
+    @torch.jit.export
+    def get_action(self, state):
+        """Purely mathematical path for submission/inference."""
+        x = self.base_net(state)
+        mean = self.mean_linear(x)
+        return torch.tanh(mean)
+
     def sample(self, state):
+        # Training logic
         mean, log_std = self.forward(state)
         std = log_std.exp()
         normal = Normal(mean, std)
-        x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
+        x_t = normal.rsample()  
         y_t = torch.tanh(x_t)
         action = y_t
         
-        # Enforcing Action Bound
         log_prob = normal.log_prob(x_t)
-        # Enforcing correction for Tanh squashing
         log_prob -= torch.log(1 - action.pow(2) + 1e-6)
         log_prob = log_prob.sum(1, keepdim=True)
-        mean = torch.tanh(mean)
-        return action, log_prob, mean
+        
+        mean_action = torch.tanh(mean)
+        return action, log_prob, mean_action
 
 class QNetwork(nn.Module):
     def __init__(self, n_features, n_actions, neurons, activation_function=F.relu):

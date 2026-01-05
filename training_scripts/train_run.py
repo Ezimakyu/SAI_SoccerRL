@@ -1,258 +1,261 @@
-# train_run.py
+# NOTE THAT THE PREPROCESSED IMITATION LEARNING HAS A PADDING (doesn't include task id hotencoding)
+# Once we start training for all three tasks, will need to modify preprocessing 
+
+
 import os
+import glob
 import wandb
 from collections import deque, defaultdict
 import numpy as np
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 import sys
 
 # Allow importing from current directory
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# --- CHANGED IMPORTS ---
-import run_config as C       # Points to run_config.py
-import run_rewards as R      # Points to run_rewards.py
-from balance_utils import ReplayBuffer # Re-use the utility class (no need to rename)
+import run_config as C       
+import run_rewards as R      
+from balance_utils import ReplayBuffer 
 from sac import SAC
 from main import Preprocessor, get_action_function, ENV_IDS, MultiTaskEnv
 
-# --- OPTIONAL: SAI IMPORTS ---
-try:
-    import sai_mujoco
-    print("[train_run] Imported sai_mujoco for local environment registration.")
-except ImportError:
-    pass
+# --- CONFIGURATION & PATHS ---
+USE_DEMONSTRATIONS = True
+BC_STEPS = 20000         
+BC_BATCH_SIZE = 256
+LOAD_CHECKPOINT = True   
+# Defined here to avoid scrolling into the training loop
+CHECKPOINT_FILENAME = "sac_run_checkpoint_trystep3.pth" 
 
-try:
-    from sai_rl import SAIClient
-except Exception as e:
-    print(f"[train_run] Warning: SAIClient init failed: {e}")
+# DEMO FILES
+DEMO_DIR = os.path.join(os.path.dirname(__file__), "demonstrations")
+DEMO_FILES = [
+    os.path.join(DEMO_DIR, "running_processed.npz"),
+    os.path.join(DEMO_DIR, "jogging_processed.npz"),
+    os.path.join(DEMO_DIR, "walking_processed.npz"),
+    os.path.join(DEMO_DIR, "soccer_drill_run_processed.npz"),
+]
 
+# --- HELPER: ROBUST PHYSICS FINDER ---
+def find_mujoco_objects(env_obj):
+    """Recursively hunts for (model, data) objects."""
+    if hasattr(env_obj, 'data') and hasattr(env_obj, 'model'):
+        return env_obj.model, env_obj.data
+    if hasattr(env_obj, 'sim'):
+        return env_obj.sim.model, env_obj.sim.data
+    
+    if hasattr(env_obj, 'unwrapped') and env_obj.unwrapped != env_obj:
+        m, d = find_mujoco_objects(env_obj.unwrapped)
+        if d: return m, d
 
+    for attr in ['env', 'envs', 'active_env', '_env', 'task_envs']:
+        if hasattr(env_obj, attr):
+            child = getattr(env_obj, attr)
+            if isinstance(child, dict) and len(child) > 0:
+                child = list(child.values())[0]
+            elif isinstance(child, list) and len(child) > 0:
+                child = child[0]
+            
+            if child:
+                m, d = find_mujoco_objects(child)
+                if d: return m, d
+    return None, None
+
+def detect_root_body(model, data):
+    """Finds the index of the main torso/root body by checking initial Z-heights."""
+    print("\n[Physics] Scanning bodies to find Torso/Root...")
+    best_id = 1 
+    max_z = -999.0
+    n_bodies = getattr(model, 'nbody', 0)
+    if n_bodies == 0: n_bodies = 10 
+        
+    for i in range(1, n_bodies):
+        try:
+            z_val = data.xpos[i, 2]
+            name = "unknown"
+            if hasattr(model, 'body_id2name'):
+                name = model.body_id2name(i)
+            elif hasattr(model, 'body_names'):
+                name = model.body_names[i]
+            print(f"  Body {i} ({name}): Z = {z_val:.4f} m")
+            if z_val > max_z and z_val < 1.5:
+                max_z = z_val
+                best_id = i
+        except:
+            break
+            
+    print(f"[Physics] Locked onto Body {best_id} as Root. Initial Height: {max_z:.4f} m")
+    return best_id
+
+def load_demonstrations_to_buffer(buffer, file_paths):
+    total_count = 0
+    print(f"[Loader] Attempting to load {len(file_paths)} demonstration files...")
+    for file_path in file_paths:
+        if not os.path.exists(file_path): continue
+        try:
+            data = np.load(file_path)
+            obs, actions, rewards = data['obs'], data['actions'], data['rewards']
+            next_obs, dones = data['next_obs'], data['dones']
+            
+            if obs.shape[1] == 87:
+                obs = np.hstack([obs, np.zeros((obs.shape[0], 1), dtype=np.float32)])
+            if next_obs.shape[1] == 87:
+                next_obs = np.hstack([next_obs, np.zeros((next_obs.shape[0], 1), dtype=np.float32)])
+
+            n_steps = min(len(obs), len(actions), len(rewards), len(next_obs), len(dones))
+            for t in range(n_steps):
+                buffer.push(obs[t], actions[t], rewards[t], next_obs[t], dones[t])
+            total_count += n_steps
+        except Exception as e:
+            print(f"  [Error] Failed to load {os.path.basename(file_path)}: {e}")
+    return total_count
+
+def pretrain_actor_bc(agent, replay_buffer, steps, batch_size):
+    if len(replay_buffer) < batch_size: return
+    print(f"[Pre-Train] Starting Imitation Learning for {steps} steps...")
+    criterion = torch.nn.MSELoss()
+    optimizer = torch.optim.Adam(agent.actor.parameters(), lr=3e-4)
+    pbar = tqdm(range(steps), desc="Imitation Learning")
+    for i in pbar:
+        state_batch, action_batch, _, _, _ = replay_buffer.sample(batch_size)
+        state_batch = torch.FloatTensor(state_batch).to(agent.device)
+        action_batch = torch.FloatTensor(action_batch).to(agent.device)
+        outputs = agent.actor(state_batch)
+        pred_action = outputs[2] if isinstance(outputs, tuple) and len(outputs) >= 3 else (outputs[0] if isinstance(outputs, tuple) else outputs)
+        loss = criterion(pred_action, action_batch)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    print("[Pre-Train] Behavior Cloning complete.")
+
+# --- MAIN LOOP ---
 def train_run():
-    # 1. SETUP ENVIRONMENT
     env = MultiTaskEnv(ENV_IDS)
     preprocessor = Preprocessor()
-    
     dummy_obs, dummy_info = env.reset()
+    
+    mj_model, mj_data = find_mujoco_objects(env)
+    if mj_data is None:
+        print("\nFATAL: Could not find MuJoCo data object.")
+        return
+    
+    root_body_id = detect_root_body(mj_model, mj_data)
     n_features = preprocessor.modify_state(dummy_obs, dummy_info).shape[1]
-
+    
     agent = SAC(
         n_features=n_features,
         action_space=env.action_space,
         log_std_min=-4.0,
         log_std_max=-0.5,
-        alpha=0.03,
-        alpha_decay=0.9999,
-        alpha_min=0.01,
+        alpha=0.05, 
         device="mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"),
     )
-    
-    print(f"[train_run] SAC device: {agent.device}")
-    
-    # Load PREVIOUS balance checkpoint if you have a good one (Optional but recommended)
-    resume_ckpt_path = os.path.join(os.path.dirname(__file__), "run_models", "sac_run_statue.pth")
-    if os.path.exists(resume_ckpt_path):
-        agent.load_state_dict(torch.load(resume_ckpt_path, map_location=agent.device))
-        
-        # 2. FORCE ENTROPY RESET (The "Re-Explore" Fix)
-        # Your SAC implementation stores alpha as a float.
-        # We reset it to a higher value (e.g., 0.1 or 0.2) to make the policy
-        # "curious" again, so it will try leaning forward to find the running reward.
-        target_reset_alpha = 0.2
-        
-        # Overwrite the internal variable
-        agent.alpha = target_reset_alpha
-        
-        # CRITICAL: Reset the decay step counter so it doesn't instantly decay back down
-        if hasattr(agent, '_update_steps'):
-            agent._update_steps = 0
-            
-        print(f"[train_run] *** ENTROPY RESET: Alpha forced to {agent.alpha} for re-exploration ***")
-    # else:
-    # print("[train_run] STARTING FRESH (No checkpoint loaded).")
 
-    replay_buffer = ReplayBuffer(C.REPLAY_SIZE)
-    action_function = get_action_function(env.action_space)
-
-    # 2. LOGGING SETUP
-    if C.USE_WANDB:
-        wandb.init(
-            project="booster-run",  # Changed project name
-            name="run-v1",
-            config={k: v for k, v in vars(C).items() if not k.startswith('__')}
-        )
-
-    # Changed save directory to 'run_models'
     model_dir = os.path.join(os.path.dirname(__file__), "run_models")
     os.makedirs(model_dir, exist_ok=True)
+    
+    # Path constructed from top-level config
+    resume_path = os.path.join(model_dir, CHECKPOINT_FILENAME)
+    
+    loaded_checkpoint = False
+    if LOAD_CHECKPOINT and os.path.exists(resume_path):
+        agent.load_state_dict(torch.load(resume_path, map_location=agent.device))
+        print(f"[Init] Loaded Checkpoint from {CHECKPOINT_FILENAME}")
+        loaded_checkpoint = True
+    else:
+        print("[Init] Starting Fresh.")
 
-    # 3. TRAINING LOOP
+    replay_buffer = ReplayBuffer(C.REPLAY_SIZE)
+    action_function = get_action_function()
+
+    if USE_DEMONSTRATIONS and not loaded_checkpoint:
+        cnt = load_demonstrations_to_buffer(replay_buffer, DEMO_FILES)
+        if cnt > 0:
+            pretrain_actor_bc(agent, replay_buffer, BC_STEPS, BC_BATCH_SIZE)
+            torch.save(agent.state_dict(), os.path.join(model_dir, "sac_run_seeded.pth"))
+
+    if C.USE_WANDB:
+        wandb.init(project="booster-run", name="run-v7-xpos-fix", config=vars(C))
+
     total_steps = 0
     episode_num = 0
-    best_episode_reward = -float("inf")
-    recent_episode_rewards = deque(maxlen=C.LOG_WINDOW_EPISODES)
-    last_logged_episode = -1
-    
-    pbar = tqdm(total=C.TIMESTEPS)
+    best_reward = -float("inf")
+    recent_rewards = deque(maxlen=C.LOG_WINDOW_EPISODES)
+    pbar = tqdm(total=C.TIMESTEPS, desc="RL Training")
 
     while total_steps < C.TIMESTEPS:
         obs, info = env.reset()
         state = preprocessor.modify_state(obs, info).squeeze()
-        
-        episode_reward = 0.0
-        episode_steps = 0
-        done = False
-        
-        episode_reward_stats = defaultdict(float)
-        
+        episode_reward, episode_steps, done = 0.0, 0, False
+        stats_agg = defaultdict(float)
+        episode_reason = "Time Limit"
         qpos0 = state[:12].copy()
         prev_action = np.zeros(env.action_space.shape, dtype=np.float32)
         prev_base_ang_vel = state[27:30].copy()
 
-        while not done and total_steps < C.TIMESTEPS:
-            # A. ACTION SELECTION
-            if total_steps < C.WARMUP_STEPS:
-                with torch.no_grad():
-                    action = agent.select_action(state, evaluate=False)
-                action = action + np.random.normal(0.0, 0.1, size=action.shape)
-            else:
-                action = agent.select_action(state)
-
-            if np.random.rand() < C.PERTURB_PROB:
-                action = action + np.random.normal(0.0, C.PERTURB_POLICY_STD, size=action.shape)
-
-            # B. DYNAMIC CLIPPING (URGENCY)
-            cur_gravity = state[24:27]
-            cur_tilt = float(np.linalg.norm(cur_gravity[:2]))
-            cur_ang = state[27:30]
+        while not done:
+            should_warmup = (not loaded_checkpoint) and (total_steps < C.WARMUP_STEPS) and (len(replay_buffer) == 0)
+            action = env.action_space.sample() if should_warmup else agent.select_action(state, evaluate=False)
+            action_clamped = np.clip(action, -C.POLICY_ACTION_CLIP, C.POLICY_ACTION_CLIP)
             
-            ang_acc_est = float(np.linalg.norm(cur_ang - prev_base_ang_vel)) / C.DT
-            
-            fall_urgency_pre = float(np.clip(
-                np.linalg.norm(cur_ang) * C.URGENCY_W_ANG + 
-                C.URGENCY_W_TILT * cur_tilt + 
-                C.URGENCY_W_ANG_ACC * ang_acc_est, 
-                0.0, C.URGENCY_MAX
-            ))
-            
-            dynamic_clip = float(C.POLICY_ACTION_CLIP + C.DYNAMIC_CLIP_W * fall_urgency_pre)
-            dynamic_clip = min(dynamic_clip, 1.0)
-
-            action = np.clip(action, -dynamic_clip, dynamic_clip)
-            scaled_action = action_function(action)
-            
-            # C. EXTERNAL DISTURBANCE
-            if np.random.rand() < C.PERTURB_PROB:
-                torque_std = C.PERTURB_TORQUE_STD_FRAC * (env.action_space.high - env.action_space.low)
-                scaled_action = scaled_action + np.random.normal(0.0, torque_std, size=scaled_action.shape)
-                scaled_action = np.clip(scaled_action, env.action_space.low, env.action_space.high)
-
-            # D. ENV STEP
-            next_obs, _, _, truncated, info = env.step(scaled_action)
+            next_obs, _, _, truncated, info = env.step(action_function(action_clamped))
             next_state = preprocessor.modify_state(next_obs, info).squeeze()
 
-            # E. REWARD CALCULATION (Uses run_rewards.py)
+            try:
+                true_height = mj_data.xpos[root_body_id, 2]
+            except:
+                true_height = 0.62
+
             reward, terminated, reason, stats = R.calculate_reward(
-                state, next_state, action, prev_action, qpos0
+                state, next_state, action_clamped, prev_action, qpos0, prev_base_ang_vel, 
+                episode_steps * C.DT, true_height
             )
 
             episode_steps += 1
-            if episode_steps >= C.MAX_EPISODE_STEPS:
-                truncated = True
-
-            done = bool(terminated or truncated)
-            episode_reward += float(reward)
-
+            if episode_steps >= C.MAX_EPISODE_STEPS: truncated = True
+            done = terminated or truncated
+            if terminated: episode_reason = reason
+            episode_reward += reward
             if C.DEBUG_REWARDS:
-                for k, v in stats.items():
-                    episode_reward_stats[k] += v
+                for k, v in stats.items(): stats_agg[k] += v
 
             replay_buffer.push(state, action, reward, next_state, done)
             
-            prev_action = action
-            prev_base_ang_vel = cur_ang.copy()
+            if len(replay_buffer) > C.BATCH_SIZE and total_steps % C.UPDATE_INTERVAL == 0:
+                for _ in range(C.UPDATES_PER_INTERVAL):
+                    agent.update(*replay_buffer.sample(C.BATCH_SIZE))
+
             state = next_state
+            prev_action = action_clamped
+            prev_base_ang_vel = next_state[27:30].copy()
             total_steps += 1
             pbar.update(1)
+            if done: break
 
-            # Gradient Step
-            q_loss = 0.0
-            pi_loss = 0.0
-            if total_steps > C.WARMUP_STEPS and len(replay_buffer) > C.BATCH_SIZE:
-                if total_steps % C.UPDATE_INTERVAL == 0:
-                    for _ in range(C.UPDATES_PER_INTERVAL):
-                        q_loss, pi_loss = agent.update(*replay_buffer.sample(C.BATCH_SIZE))
-            
-            if C.USE_WANDB and total_steps > C.WARMUP_STEPS and total_steps % C.UPDATE_INTERVAL == 0:
-                wandb.log({
-                   "train/q_loss": q_loss,
-                   "train/pi_loss": pi_loss,
-                }, step=total_steps)
-
-        # --- EPISODE END LOGIC ---
         episode_num += 1
-        
-        # 1. Debug Print
-        if C.DEBUG_REWARDS and (episode_num % C.DEBUG_PRINT_INTERVAL == 0):
-            print(f"\n[DEBUG] Episode {episode_num} Reward Breakdown (Total: {episode_reward:.2f}):")
-            sorted_stats = sorted(episode_reward_stats.items(), key=lambda x: abs(x[1]), reverse=True)
-            for k, v in sorted_stats:
-                sign = "+" if v >= 0 else ""
-                print(f"  {k:<15} : {sign}{v:.2f}")
-            print("-" * 40)
-            
-            if C.USE_WANDB:
-                 debug_dict = {f"rewards/{k}": v for k, v in episode_reward_stats.items()}
-                 wandb.log(debug_dict, step=total_steps)
-
-        # 2. Stats Tracking
-        recent_episode_rewards.append(episode_reward)
-        
-        if len(recent_episode_rewards) > 0:
-            r_min = float(np.min(recent_episode_rewards))
-            r_median = float(np.median(recent_episode_rewards))
-            r_avg = float(np.mean(recent_episode_rewards))
-            r_max = float(np.max(recent_episode_rewards))
-        else:
-            r_min = r_median = r_avg = r_max = episode_reward
-
-        # 3. Save Best
-        if episode_reward > best_episode_reward:
-            best_episode_reward = episode_reward
+        recent_rewards.append(episode_reward)
+        if episode_reward > best_reward:
+            best_reward = episode_reward
             torch.save(agent.state_dict(), os.path.join(model_dir, "sac_run_best.pth"))
 
-        # 4. Periodic Log
-        if episode_num > 0 and (episode_num % C.LOG_EVERY_EPISODES == 0) and (episode_num != last_logged_episode):
-            tqdm.write(
-                f"[run] Ep {episode_num} | "
-                f"Min: {r_min:6.2f} | "
-                f"Med: {r_median:6.2f} | "
-                f"Avg: {r_avg:6.2f} | "
-                f"Max: {r_max:6.2f} | "
-                f"Steps: {episode_steps}"
-            )
+        if episode_num % C.LOG_EVERY_EPISODES == 0:
+            tqdm.write(f"Ep {episode_num} | Reward: {episode_reward:.2f} | Avg: {np.mean(recent_rewards):.2f} | Reason: {episode_reason}")
             
-            if C.USE_WANDB:
-                wandb.log({
-                    "episode/reward_min": r_min,
-                    "episode/reward_median": r_median,
-                    "episode/reward_avg": r_avg,
-                    "episode/reward_max": r_max,
-                    "episode/length": episode_steps,
-                }, step=total_steps)
-            last_logged_episode = episode_num
-
+            # 2. Force Debug Print
+            if C.DEBUG_REWARDS and episode_steps > 0:
+                print("   [Rewards Breakdown]")
+                for k, v in stats_agg.items():
+                    # Calculate average per step for this episode
+                    avg_val = v / episode_steps
+                    if abs(avg_val) > 0.001:
+                        print(f"      {k.replace('r_', '')}: {avg_val:.4f}")
+            print("-" * 40)
         if episode_num % 50 == 0:
             torch.save(agent.state_dict(), os.path.join(model_dir, "sac_run_checkpoint.pth"))
 
-    torch.save(agent.state_dict(), os.path.join(model_dir, "sac_run_final.pth"))
-    print("[train_run] Training complete.")
-    if C.USE_WANDB:
-        wandb.finish()
     env.close()
-
 
 if __name__ == "__main__":
     train_run()

@@ -58,7 +58,7 @@ class MultiTaskEnv(gym.Env):
 # Moved to main execution block
 
 class Preprocessor():
-    def get_task_onehot(self, info):
+    def get_task_onehot(self, info, batch_size):
         idx = info.get('task_index', None)
         
         if idx is None:
@@ -69,97 +69,117 @@ class Preprocessor():
             else:
                 idx = 0 # LowerT1GoaliePenaltyKick-v0 (Default)
 
-        if hasattr(idx, 'item'):
-             idx = idx.item() if np.ndim(idx) == 0 else (idx[0] if len(idx) > 0 else 0)
+        # Force conversion to a flat array and grab the first element safely
+        try:
+            raw_idx = np.array(idx).reshape(-1)[0]
+            safe_idx = int(raw_idx)
+        except:
+            safe_idx = 0
         
-        vec = np.zeros(3)
-        safe_idx = int(idx)
+        # Create a batch of one-hot vectors
+        vecs = np.zeros((batch_size, 3), dtype=np.float32)
         if 0 <= safe_idx < 3:
-            vec[safe_idx] = 1.0
-        return vec
+            vecs[:, safe_idx] = 1.0
+        return vecs
 
     def quat_rotate_inverse(self, q: np.ndarray, v: np.ndarray):
-        q_w = q[:,[-1]]
-        q_vec = q[:,:3]
+        # q is (batch, 4), v is (batch, 3)
+        q_w = q[:, [-1]]
+        q_vec = q[:, :3]
         a = v * (2.0 * q_w**2 - 1.0)
         b = np.cross(q_vec, v) * (q_w * 2.0)
-        c = q_vec * (np.dot(q_vec, v).reshape(-1,1) * 2.0)    
+        c = q_vec * (np.sum(q_vec * v, axis=1, keepdims=True) * 2.0)    
         return a - b + c 
 
-    def safe_get(self, info, key, target_len):
-        val = np.zeros((1, target_len)) 
+    def safe_get(self, info, key, target_len, batch_size):
+        # Initialize zero array for the full batch
+        val = np.zeros((batch_size, target_len), dtype=np.float32) 
         if key in info:
-            data = info[key]
-            data = np.array(data).flatten()
-            current_len = len(data)
-            limit = min(target_len, current_len)
-            val[0, :limit] = data[:limit]
+            data = np.array(info[key])
+            
+            # Ensure data is 2D (batch, features)
+            if len(data.shape) == 1:
+                data = data.reshape(1, -1)
+            
+            # If info provides 1 row but we have 16 envs, tile it
+            if data.shape[0] == 1 and batch_size > 1:
+                data = np.tile(data, (batch_size, 1))
+            
+            # Copy data into our pre-allocated zero array
+            limit_rows = min(batch_size, data.shape[0])
+            limit_cols = min(target_len, data.shape[1])
+            val[:limit_rows, :limit_cols] = data[:limit_rows, :limit_cols]
+            
         return val
 
     def modify_state(self, obs, info):
+        # Ensure obs is 2D (batch, features)
         if len(obs.shape) == 1:
-            obs = np.expand_dims(obs, axis=0)
+            obs = obs.reshape(1, -1)
+            
+        batch_size = obs.shape[0]
 
-        task_onehot = self.get_task_onehot(info)
-        if len(task_onehot.shape) == 1:
-            task_onehot = np.expand_dims(task_onehot, axis=0)
+        # 1. Task One-Hot
+        task_onehot = self.get_task_onehot(info, batch_size)
         
-        # Ensure dimensions for always-present keys
-        keys_to_expand = [
-            "robot_quat", "robot_gyro", "robot_accelerometer", "robot_velocimeter",
-            "goal_team_0_rel_robot", "goal_team_1_rel_robot",
-            "goal_team_0_rel_ball", "goal_team_1_rel_ball",
-            "ball_xpos_rel_robot", "ball_velp_rel_robot", "ball_velr_rel_robot",
-            "player_team"
-        ]
-        for k in keys_to_expand:
-            if k in info and len(info[k].shape) == 1:
-                info[k] = np.expand_dims(info[k], axis=0)
+        # 2. Variable info keys (Goalkeepers, targets, etc.)
+        goalkeeper_0_xpos = self.safe_get(info, "goalkeeper_team_0_xpos_rel_robot", 3, batch_size)
+        goalkeeper_0_velp = self.safe_get(info, "goalkeeper_team_0_velp_rel_robot", 3, batch_size)
+        goalkeeper_1_xpos = self.safe_get(info, "goalkeeper_team_1_xpos_rel_robot", 3, batch_size)
+        goalkeeper_1_velp = self.safe_get(info, "goalkeeper_team_1_velp_rel_robot", 3, batch_size)
+        target_xpos = self.safe_get(info, "target_xpos_rel_robot", 3, batch_size)
+        target_velp = self.safe_get(info, "target_velp_rel_robot", 3, batch_size)
+        defender_xpos = self.safe_get(info, "defender_xpos", 8, batch_size)
 
-        # Variable keys
-        goalkeeper_0_xpos = self.safe_get(info, "goalkeeper_team_0_xpos_rel_robot", 3)
-        goalkeeper_0_velp = self.safe_get(info, "goalkeeper_team_0_velp_rel_robot", 3)
-        goalkeeper_1_xpos = self.safe_get(info, "goalkeeper_team_1_xpos_rel_robot", 3)
-        goalkeeper_1_velp = self.safe_get(info, "goalkeeper_team_1_velp_rel_robot", 3)
-        target_xpos = self.safe_get(info, "target_xpos_rel_robot", 3)
-        target_velp = self.safe_get(info, "target_velp_rel_robot", 3)
-        defender_xpos = self.safe_get(info, "defender_xpos", 8)
+        # 3. Core Robot State
+        robot_qpos = obs[:, :12]
+        robot_qvel = obs[:, 12:24]
+        
+        # Helper to ensure info keys are 2D
+        def get_info_2d(key, width):
+            if key in info:
+                d = np.array(info[key])
+                if len(d.shape) == 1: d = d.reshape(1, -1)
+                if d.shape[0] == 1 and batch_size > 1: d = np.tile(d, (batch_size, 1))
+                return d
+            return np.zeros((batch_size, width), dtype=np.float32)
 
-        # Core State Extraction
-        robot_qpos = obs[:,:12]
-        robot_qvel = obs[:,12:24]
-        quat = info["robot_quat"]
-        base_ang_vel = info["robot_gyro"]
-        project_gravity = self.quat_rotate_inverse(quat, np.array([0.0, 0.0, -1.0]))
+        quat = get_info_2d("robot_quat", 4)
+        base_ang_vel = get_info_2d("robot_gyro", 3)
+        accel = get_info_2d("robot_accelerometer", 3)
+        velocimeter = get_info_2d("robot_velocimeter", 3)
         
-        # Stack Construction (CRITICAL FOR INDICES)
-        # 0-12: qpos
-        # 12-24: qvel
-        # 24-27: grav
-        # 27-30: gyro
-        # 30-33: accel
-        # 33-36: velocimeter  <-- ROBOT VELOCITY
-        # 36-39: goal0 rel robot
-        # 39-42: goal1 rel robot
-        # 42-45: goal0 rel ball
-        # 45-48: goal1 rel ball
-        # 48-51: ball rel robot <-- TARGET VECTOR
+        # Gravity Projection (Batch Aware)
+        gravity_base = np.tile(np.array([0.0, 0.0, -1.0]), (batch_size, 1))
+        project_gravity = self.quat_rotate_inverse(quat, gravity_base)
         
-        obs = np.hstack((
+        # Always-present relative vectors
+        goal0_rel_robot = get_info_2d("goal_team_0_rel_robot", 3)
+        goal1_rel_robot = get_info_2d("goal_team_1_rel_robot", 3)
+        goal0_rel_ball = get_info_2d("goal_team_0_rel_ball", 3)
+        goal1_rel_ball = get_info_2d("goal_team_1_rel_ball", 3)
+        ball_rel_robot = get_info_2d("ball_xpos_rel_robot", 3)
+        ball_velp_robot = get_info_2d("ball_velp_rel_robot", 3)
+        ball_velr_robot = get_info_2d("ball_velr_rel_robot", 3)
+        player_team = get_info_2d("player_team", 1)
+
+        # 4. Horizontal Stack
+        # 
+        obs_final = np.hstack((
             robot_qpos, 
             robot_qvel,
             project_gravity,
             base_ang_vel,
-            info["robot_accelerometer"],
-            info["robot_velocimeter"],
-            info["goal_team_0_rel_robot"], 
-            info["goal_team_1_rel_robot"], 
-            info["goal_team_0_rel_ball"], 
-            info["goal_team_1_rel_ball"], 
-            info["ball_xpos_rel_robot"], 
-            info["ball_velp_rel_robot"], 
-            info["ball_velr_rel_robot"], 
-            info["player_team"], 
+            accel,
+            velocimeter,
+            goal0_rel_robot, 
+            goal1_rel_robot, 
+            goal0_rel_ball, 
+            goal1_rel_ball, 
+            ball_rel_robot, 
+            ball_velp_robot, 
+            ball_velr_robot, 
+            player_team, 
             goalkeeper_0_xpos, 
             goalkeeper_0_velp, 
             goalkeeper_1_xpos, 
@@ -170,7 +190,7 @@ class Preprocessor():
             task_onehot
         ))
 
-        return obs
+        return obs_final.astype(np.float32)
 
 # --- DYNAMIC FEATURE CALCULATION ---
 # Moved to main execution block
@@ -179,19 +199,55 @@ class Preprocessor():
 # Moved to main execution block
 
 ## Define an action function
-def get_action_function(action_space):
+def get_action_function():
+    """
+    Returns the action scaling function.
+    Hardcodes limits to avoid dependency on global 'action_space'.
+    """
+    # Define limits inside the function (Self-contained)
+    # These match the standard Booster/Humanoid torque limits
+    low = np.array([-45.0] * 12, dtype=np.float32) # Adjust if your env uses different limits
+    high = np.array([45.0] * 12, dtype=np.float32)
+    
     def action_function(policy):
-        expected_bounds = [-1, 1]
-        action_percent = (policy - expected_bounds[0]) / (
-            expected_bounds[1] - expected_bounds[0]
-        )
-        bounded_percent = np.minimum(np.maximum(action_percent, 0), 1)
-        return (
-                action_space.low
-                + (action_space.high - action_space.low) * bounded_percent
-        )
+        # Policy is usually tanh output [-1, 1]
+        expected_bounds = [-1.0, 1.0]
+        
+        # Normalize to [0, 1]
+        action_percent = (policy - expected_bounds[0]) / (expected_bounds[1] - expected_bounds[0])
+        
+        # Clip strictly
+        bounded_percent = np.minimum(np.maximum(action_percent, 0.0), 1.0)
+        
+        # Scale to Torque
+        return low + (high - low) * bounded_percent
     return action_function
 
+# What to submit to SAI
+# def action_function(policy):
+#     """
+#     Self-contained torque scaler for submission.
+#     Handles both single inputs and vectorized batches (e.g., 16 parallel robots).
+#     Maps neural net output [-1, 1] to torque limits [-45, 45].
+#     """
+#     # Physical limits found from environment check
+#     low = -45.0
+#     high = 45.0
+    
+#     # 1. Ensure input is a numpy array
+#     policy = np.array(policy)
+    
+#     # 2. Map policy (-1 to 1) to 0 to 1
+#     # This works for both scalars, vectors, and matrices (batching)
+#     action_percent = (policy - (-1.0)) / (1.0 - (-1.0))
+    
+#     # 3. Strictly clip to [0, 1] range
+#     # np.clip handles multi-dimensional arrays automatically
+#     bounded_percent = np.clip(action_percent, 0.0, 1.0)
+    
+#     # 4. Scale to torque: -45 + (90 * percent)
+#     # Result will have the same shape as the input 'policy'
+#     return low + (high - low) * bounded_percent
 
 ## Train the model
 if __name__ == "__main__":
