@@ -19,12 +19,12 @@ USE_WANDB = False
 # --- 3. REWARD WEIGHTS ---
 
 # A. The Core Drivers
-TRACKING_VEL_W = 4.0         
+TRACKING_VEL_W = 6.0         
 PHASE_W = 1.2                
 ALIVE_W = 5.0                
 
 # B. Stability & Posture
-TARGET_FORWARD_TILT = 0.4    # ~23 deg forward lean
+TARGET_FORWARD_TILT = 0.4    
 FORWARD_TILT_W = 3.0         
 BACKWARD_TILT_PENALTY = 6.0  
 SIDE_TILT_PENALTY = 1.0      
@@ -37,17 +37,20 @@ ANG_VEL_XY_W = -0.02
 TARGET_HIP_SPLIT = 0.6       
 SPLIT_STANCE_W = 3.0         
 
-# [NEW] Anti-Splay (Constrain hips to forward motion only)
-# Penalize Hip Roll (1, 7) and Yaw (2, 8) if they deviate from 0.
-HIP_SPLAY_PENALTY_W = -2.0   
+# D. Constraints & Style
+# Heavy penalty for using Hip Roll/Yaw to move (Fixes "Weird Hip")
+HIP_SPLAY_PENALTY_W = -5.0   
 
-# D. Height & Feet
+# [NEW] Encourages the stance leg to be straight (0.0) to support weight
+STANCE_STRAIGHT_W = 1.0      
+
+# Reduced generic bend reward so it doesn't fight the straightening logic
+KNEE_BEND_W = 0.8            
+
+# E. Height & Feet
 TARGET_HEIGHT = 0.62         
 HEIGHT_W = 3.0               
 FEET_AIR_TIME_W = 1.0        
-
-# E. Style
-KNEE_BEND_W = 0.8            
 
 # F. Efficiency
 ENERGY_W = -0.001            
@@ -60,18 +63,20 @@ TARGET_VEL_X = 1.5
 LEAN_THRESHOLD = 0.6         
 
 # --- 5. CHECKPOINT ---
-CHECKPOINT_FILENAME = "sac_run_checkpoint_spamtrain9.pth"
+CHECKPOINT_FILENAME = "sac_run_checkpoint_astep.pth"
 
 # --- 6. INDICES ---
-# Y-axis = Pitch (Swinging forward/backward)
-HIP_PITCH_IDXS = [0, 6]      # hip_y_left (0), hip_y_right (6)
-KNEE_IDXS      = [3, 9]      # knee_y_left (3), knee_y_right (9)
+# 0/6 = Hip Y (Pitch) -> Main Walking Joint
+HIP_PITCH_IDXS = [0, 6]      
 
-# X-axis = Roll (Splaying legs outward/inward)
-HIP_ROLL_IDXS  = [1, 7]      # hip_x_left (1), hip_x_right (7)
+# 1/7 = Hip X (Roll) -> Splay Constraint
+HIP_ROLL_IDXS  = [1, 7]      
 
-# Z-axis = Yaw (Twisting the leg)
-HIP_YAW_IDXS   = [2, 8]      # hip_z_left (2), hip_z_right (8) 
+# 2/8 = Hip Z (Yaw) -> Weird Rotation Constraint
+HIP_YAW_IDXS   = [2, 8]      
+
+# 3/9 = Knee Y
+KNEE_IDXS      = [3, 9]           
 
 # --- 7. DEBUG ---
 POLICY_ACTION_CLIP = 1.0     
