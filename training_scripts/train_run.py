@@ -252,6 +252,9 @@ def train_run():
 
         if episode_num % C.SAVE_EVERY_EPISODES == 0:
             torch.save(agent.state_dict(), os.path.join(model_dir, "sac_run_checkpoint.pth"))
+        if episode_num % C.SAVE_EVERY_EPISODES_LONGER == 0:
+            longer_filename = f"sac_run_checkpoint{episode_num:05d}.pth"
+            torch.save(agent.state_dict(), os.path.join(model_dir, longer_filename))
 
     env.close()
 

@@ -1,4 +1,4 @@
-
+# Reward breakdown is likely inaccurate
 # Visualize stand: python visualize.py
 # Visualize balance: python visualize.py --model_type sac --model_path training_scripts/balance_models/sac_balance_checkpoint.pth --policy_clip 0.35
 # Visualize run: python visualize.py --model_type sac --model_path training_scripts/run_models/sac_run_checkpoint.pth
@@ -10,36 +10,59 @@ import gymnasium as gym
 import time
 import sys
 import os
+import argparse
 
-# Add training_scripts to python path so we can import modules from it
+# --- Path Setup ---
 sys.path.append(os.path.join(os.path.dirname(__file__), 'training_scripts'))
 
 from sai_rl import SAIClient
-# from training_scripts.td3 import TD3
 from sac import SAC
 from training_scripts.main import Preprocessor, get_action_function, ENV_IDS
 
-import argparse
+# --- Import Custom Reward Logic ---
+import run_config as C
+import run_rewards
 
-# Configuration
-# Defaults
+# --- Configuration ---
 DEFAULT_MODEL_PATH = "training_scripts/stand_models/sac_balance_checkpoint.pth"
 DEFAULT_MODEL_TYPE = "sac" 
 DEFAULT_TASK_INDEX = 0
-DEFAULT_POLICY_CLIP = 0.35
+DEFAULT_POLICY_CLIP = 0.35 
+
+def get_mujoco_data(env):
+    """
+    Robustly finds the MuJoCo 'data' object (containing qpos/qvel) 
+    by digging through Gym/Gymnasium wrappers.
+    """
+    # 1. Try standard unwrap
+    if hasattr(env, "unwrapped"):
+        if hasattr(env.unwrapped, "data"):
+            return env.unwrapped.data
+    
+    # 2. Recursive search for 'data' or 'physics' (dm_control)
+    curr = env
+    for _ in range(10): # Depth limit
+        if hasattr(curr, "data") and hasattr(curr.data, "qpos"):
+            return curr.data
+        if hasattr(curr, "physics") and hasattr(curr.physics, "data"): # dm_control style
+            return curr.physics.data
+        if hasattr(curr, "sim") and hasattr(curr.sim, "data"): # Old gym style
+            return curr.sim.data
+        
+        # Go deeper
+        if hasattr(curr, "env"):
+            curr = curr.env
+        else:
+            break
+            
+    return None
 
 def visualize():
     parser = argparse.ArgumentParser(description="Visualize Trained Policy")
-    parser.add_argument("--model_path", type=str, default=DEFAULT_MODEL_PATH, help="Path to model checkpoint")
-    parser.add_argument("--model_type", type=str, default=DEFAULT_MODEL_TYPE, choices=["sac"], help="Model type: sac")
-    parser.add_argument("--task_index", type=int, default=DEFAULT_TASK_INDEX, help="Task index (0-2)")
-    parser.add_argument(
-        "--policy_clip",
-        type=float,
-        default=DEFAULT_POLICY_CLIP,
-        help="Clamp SAC policy output in [-policy_clip, +policy_clip] before scaling. "
-             "This should match training (e.g. POLICY_ACTION_CLIP in train_stand.py).",
-    )
+    parser.add_argument("--model_path", type=str, default=DEFAULT_MODEL_PATH)
+    parser.add_argument("--model_type", type=str, default=DEFAULT_MODEL_TYPE, choices=["sac"])
+    parser.add_argument("--task_index", type=int, default=DEFAULT_TASK_INDEX)
+    parser.add_argument("--policy_clip", type=float, default=DEFAULT_POLICY_CLIP)
     args = parser.parse_args()
 
     MODEL_PATH = args.model_path
@@ -49,40 +72,30 @@ def visualize():
     RENDER_MODE = "human"
 
     # 1. Initialize the Environment
-    # We load a specific environment to watch, e.g., the Goalie task
     env_name = ENV_IDS[TASK_INDEX]
     print(f"Loading environment: {env_name}")
     
-    # Try to import sai_mujoco to register envs locally if SAIClient fails
     try:
         import sai_mujoco
-        print("[visualize] Imported sai_mujoco for local environment registration.")
     except ImportError:
         pass
 
-    # Initialize SAIClient (Optional for local visualization if envs are registered via import)
     try:
         from sai_rl import SAIClient
         sai = SAIClient(
             comp_id="lower-t1-penalty-kick-goalie",
             api_key="sai_ddqEmPy1JIeQoGSI72BcdGUePbVdYtSj" 
         )
-    except Exception as e:
-        print(f"[visualize] Warning: SAIClient init failed (offline mode?): {e}")
+    except Exception:
+        pass
     
-    # Use sai.make_env for convenience as it handles render modes and registration well
-    # Or use gym.make(env_name, render_mode=RENDER_MODE) if registered
     env = gym.make(env_name, render_mode=RENDER_MODE)
     action_function = get_action_function()
-
-    # 2. Initialize Preprocessor
     preprocessor = Preprocessor()
 
     try:
-        # 3. Initialize Model (Architecture must match training)
-        # Get feature dimension dynamically to be safe
+        # 3. Initialize Model
         dummy_obs, dummy_info = env.reset()
-        # Mock task_index in info if missing, Preprocessor handles it but let's be explicit
         dummy_info["task_index"] = TASK_INDEX
 
         processed_state = preprocessor.modify_state(dummy_obs, dummy_info)
@@ -97,82 +110,108 @@ def visualize():
             elif torch.cuda.is_available():
                 device = "cuda"
 
-            model = SAC(
-                n_features=n_features,
-                action_space=env.action_space,
-                device=device,
-            )
+            model = SAC(n_features=n_features, action_space=env.action_space, device=device)
             print(f"[visualize] SAC device: {model.device}")
-        # elif MODEL_TYPE.lower() == "td3":
-        #     model = TD3(
-        #         n_features=n_features,
-        #         action_space=env.action_space,
-        #         neurons=[400, 300],
-        #         activation_function=F.relu,
-        #         learning_rate=0.0001,
-        #     )
-        else:
-            raise ValueError(f"Unknown MODEL_TYPE={MODEL_TYPE!r}. Use 'sac'.")
 
         # 4. Load Weights
         print(f"Loading weights from {MODEL_PATH}")
         try:
-            map_location = "cpu"
-            if MODEL_TYPE.lower() == "sac":
-                map_location = model.device  # type: ignore[attr-defined]
+            map_location = "cpu" if model.device == "cpu" else model.device
             state_dict = torch.load(MODEL_PATH, map_location=map_location)
             model.load_state_dict(state_dict)
-            model.eval()  # type: ignore[attr-defined]
+            model.eval()
         except FileNotFoundError:
             print(f"Error: Model file {MODEL_PATH} not found!")
-            return
-        except Exception as e:
-            print(f"Error loading model weights: {e}")
             return
 
         # 5. Run Loop
         print("Starting visualization... Press Ctrl+C to stop.")
-        num_episodes = 5
+        
+        # --- ROBUST QPOS RETRIEVAL ---
+        mj_data = get_mujoco_data(env)
+        if mj_data is None:
+            print("CRITICAL WARNING: Could not access MuJoCo data. Rewards will be broken.")
+            qpos0 = np.zeros(12) 
+        else:
+            # Capture the reset pose as the "Nominal Pose" (qpos0)
+            env.reset()
+            # Usually qpos is [7 root + 12 joints]
+            # We assume the robot spawns in the ideal standing pose.
+            full_qpos = mj_data.qpos.copy()
+            qpos0 = full_qpos[7:] 
+            print(f"Captured Nominal Pose (qpos0): {qpos0[:4]}...")
+
+        num_episodes = 3
 
         for ep in range(num_episodes):
             obs, info = env.reset()
-            info["task_index"] = TASK_INDEX  # Ensure preprocessor knows the task
+            info["task_index"] = TASK_INDEX
+            
+            prev_action = np.zeros(env.action_space.shape)
+            prev_base_ang_vel = np.zeros(3)
+            
+            # Reset history vars
+            if mj_data:
+                prev_height = mj_data.qpos[2]
+            else:
+                prev_height = 0.62
 
+            episode_time = 0.0
+            phase_offset = 0.0 
+            stats_buffer = {}
             done = False
-            episode_reward = 0
             step = 0
 
             while not done:
-                # Preprocess
                 s = preprocessor.modify_state(obs, info).squeeze()
 
-                # Inference
                 if MODEL_TYPE.lower() == "sac":
-                    raw_action = model.select_action(s, evaluate=True)  # type: ignore[attr-defined]
-                    # IMPORTANT: match training-time policy-space clamp (prevents huge torques / twitching)
+                    raw_action = model.select_action(s, evaluate=True)
                     if POLICY_CLIP is not None and POLICY_CLIP > 0:
                         raw_action = np.clip(raw_action, -POLICY_CLIP, POLICY_CLIP)
                     policy = np.expand_dims(raw_action, axis=0)
-                else:
-                    state_tensor = torch.from_numpy(np.expand_dims(s, axis=0))
-                    with torch.no_grad():
-                        policy = model(state_tensor).detach().numpy()  # type: ignore[operator]
-
-                # Action Scaling (No noise for visualization)
+                
                 action = action_function(policy)[0].squeeze()
+                next_obs, env_reward, terminated, truncated, info = env.step(action)
+                
+                # --- Accurate Reward Calculation ---
+                if mj_data:
+                    true_height = mj_data.qpos[2]
+                else:
+                    true_height = 0.62
 
-                # Step
-                obs, reward, terminated, truncated, info = env.step(action)
-                info["task_index"] = TASK_INDEX
+                calc_reward, _, reason, stats = run_rewards.calculate_reward(
+                    state=obs,
+                    next_state=next_obs,
+                    action=action,
+                    prev_action=prev_action,
+                    qpos0=qpos0,
+                    prev_base_ang_vel=prev_base_ang_vel,
+                    episode_time=episode_time,
+                    true_height=true_height,
+                    prev_height=prev_height,
+                    phase_offset=phase_offset
+                )
 
-                done = terminated or truncated
-                episode_reward += reward
+                for k, v in stats.items():
+                    if k not in stats_buffer: stats_buffer[k] = []
+                    stats_buffer[k].append(v)
+
+                obs = next_obs
+                prev_action = action
+                prev_height = true_height
+                episode_time += C.DT
                 step += 1
+                
+                done = terminated or truncated
 
-                # Optional: slow down if too fast
-                # time.sleep(0.01)
+            print(f"\nEp {ep+1} | Steps: {step} | Reason: {reason}")
+            print("   [Rewards Breakdown]")
+            for k, v_list in stats_buffer.items():
+                avg_val = sum(v_list) / len(v_list)
+                print(f"      {k}: {avg_val:.4f}")
+            print("-" * 40)
 
-            print(f"Episode {ep+1} Reward: {episode_reward:.2f}, Steps: {step}")
     finally:
         env.close()
 
