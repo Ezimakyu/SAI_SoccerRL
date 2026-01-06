@@ -22,20 +22,16 @@ from sac import SAC
 from main import Preprocessor, get_action_function, ENV_IDS, MultiTaskEnv
 
 # --- CONFIGURATION & PATHS ---
-USE_DEMONSTRATIONS = True
-BC_STEPS = 20000         
+USE_DEMONSTRATIONS = False
+BC_STEPS = 50000         
 BC_BATCH_SIZE = 256
 LOAD_CHECKPOINT = True   
-# Defined here to avoid scrolling into the training loop
-CHECKPOINT_FILENAME = "sac_run_checkpoint_trystep3.pth" 
+CHECKPOINT_FILENAME = C.CHECKPOINT_FILENAME # Pulled from Config
 
 # DEMO FILES
 DEMO_DIR = os.path.join(os.path.dirname(__file__), "demonstrations")
 DEMO_FILES = [
-    os.path.join(DEMO_DIR, "running_processed.npz"),
-    os.path.join(DEMO_DIR, "jogging_processed.npz"),
     os.path.join(DEMO_DIR, "walking_processed.npz"),
-    os.path.join(DEMO_DIR, "soccer_drill_run_processed.npz"),
 ]
 
 # --- HELPER: ROBUST PHYSICS FINDER ---
@@ -45,19 +41,14 @@ def find_mujoco_objects(env_obj):
         return env_obj.model, env_obj.data
     if hasattr(env_obj, 'sim'):
         return env_obj.sim.model, env_obj.sim.data
-    
     if hasattr(env_obj, 'unwrapped') and env_obj.unwrapped != env_obj:
         m, d = find_mujoco_objects(env_obj.unwrapped)
         if d: return m, d
-
     for attr in ['env', 'envs', 'active_env', '_env', 'task_envs']:
         if hasattr(env_obj, attr):
             child = getattr(env_obj, attr)
-            if isinstance(child, dict) and len(child) > 0:
-                child = list(child.values())[0]
-            elif isinstance(child, list) and len(child) > 0:
-                child = child[0]
-            
+            if isinstance(child, dict) and len(child) > 0: child = list(child.values())[0]
+            elif isinstance(child, list) and len(child) > 0: child = child[0]
             if child:
                 m, d = find_mujoco_objects(child)
                 if d: return m, d
@@ -74,18 +65,10 @@ def detect_root_body(model, data):
     for i in range(1, n_bodies):
         try:
             z_val = data.xpos[i, 2]
-            name = "unknown"
-            if hasattr(model, 'body_id2name'):
-                name = model.body_id2name(i)
-            elif hasattr(model, 'body_names'):
-                name = model.body_names[i]
-            print(f"  Body {i} ({name}): Z = {z_val:.4f} m")
             if z_val > max_z and z_val < 1.5:
                 max_z = z_val
                 best_id = i
-        except:
-            break
-            
+        except: break
     print(f"[Physics] Locked onto Body {best_id} as Root. Initial Height: {max_z:.4f} m")
     return best_id
 
@@ -156,7 +139,6 @@ def train_run():
     model_dir = os.path.join(os.path.dirname(__file__), "run_models")
     os.makedirs(model_dir, exist_ok=True)
     
-    # Path constructed from top-level config
     resume_path = os.path.join(model_dir, CHECKPOINT_FILENAME)
     
     loaded_checkpoint = False
@@ -168,6 +150,7 @@ def train_run():
         print("[Init] Starting Fresh.")
 
     replay_buffer = ReplayBuffer(C.REPLAY_SIZE)
+    # Corrected Action Function Call (No arguments)
     action_function = get_action_function()
 
     if USE_DEMONSTRATIONS and not loaded_checkpoint:
@@ -177,7 +160,7 @@ def train_run():
             torch.save(agent.state_dict(), os.path.join(model_dir, "sac_run_seeded.pth"))
 
     if C.USE_WANDB:
-        wandb.init(project="booster-run", name="run-v7-xpos-fix", config=vars(C))
+        wandb.init(project="booster-run", name="run-v8-stable", config=vars(C))
 
     total_steps = 0
     episode_num = 0
@@ -188,12 +171,21 @@ def train_run():
     while total_steps < C.TIMESTEPS:
         obs, info = env.reset()
         state = preprocessor.modify_state(obs, info).squeeze()
+        
+        # --- INITIALIZE TRACKERS ---
         episode_reward, episode_steps, done = 0.0, 0, False
         stats_agg = defaultdict(float)
         episode_reason = "Time Limit"
+        
         qpos0 = state[:12].copy()
         prev_action = np.zeros(env.action_space.shape, dtype=np.float32)
         prev_base_ang_vel = state[27:30].copy()
+        phase_offset = np.random.uniform(0.0, 1.0)
+
+        # Get initial height
+        try: current_height = mj_data.xpos[root_body_id, 2]
+        except: current_height = 0.62
+        prev_height = current_height # Initialize prev_height
 
         while not done:
             should_warmup = (not loaded_checkpoint) and (total_steps < C.WARMUP_STEPS) and (len(replay_buffer) == 0)
@@ -203,14 +195,14 @@ def train_run():
             next_obs, _, _, truncated, info = env.step(action_function(action_clamped))
             next_state = preprocessor.modify_state(next_obs, info).squeeze()
 
-            try:
-                true_height = mj_data.xpos[root_body_id, 2]
-            except:
-                true_height = 0.62
+            # Update Current Height
+            try: current_height = mj_data.xpos[root_body_id, 2]
+            except: current_height = 0.62
 
+            # CALCULATE REWARD (Passing both current and previous height)
             reward, terminated, reason, stats = R.calculate_reward(
                 state, next_state, action_clamped, prev_action, qpos0, prev_base_ang_vel, 
-                episode_steps * C.DT, true_height
+                episode_steps * C.DT, current_height, prev_height, phase_offset
             )
 
             episode_steps += 1
@@ -218,6 +210,7 @@ def train_run():
             done = terminated or truncated
             if terminated: episode_reason = reason
             episode_reward += reward
+            
             if C.DEBUG_REWARDS:
                 for k, v in stats.items(): stats_agg[k] += v
 
@@ -227,32 +220,37 @@ def train_run():
                 for _ in range(C.UPDATES_PER_INTERVAL):
                     agent.update(*replay_buffer.sample(C.BATCH_SIZE))
 
+            # --- PREPARE FOR NEXT STEP ---
             state = next_state
             prev_action = action_clamped
-            prev_base_ang_vel = next_state[27:30].copy()
+            prev_height = current_height # Update prev_height here
             total_steps += 1
             pbar.update(1)
             if done: break
 
         episode_num += 1
         recent_rewards.append(episode_reward)
+        avg_reward = np.mean(recent_rewards)
+
         if episode_reward > best_reward:
             best_reward = episode_reward
             torch.save(agent.state_dict(), os.path.join(model_dir, "sac_run_best.pth"))
 
         if episode_num % C.LOG_EVERY_EPISODES == 0:
-            tqdm.write(f"Ep {episode_num} | Reward: {episode_reward:.2f} | Avg: {np.mean(recent_rewards):.2f} | Reason: {episode_reason}")
-            
-            # 2. Force Debug Print
+            # Replaced with Robust Print Block
+            print(f"\nEp {episode_num} | Reward: {episode_reward:.2f} | Avg: {avg_reward:.2f} | Steps: {episode_steps} | Reason: {episode_reason}")
             if C.DEBUG_REWARDS and episode_steps > 0:
                 print("   [Rewards Breakdown]")
                 for k, v in stats_agg.items():
-                    # Calculate average per step for this episode
                     avg_val = v / episode_steps
                     if abs(avg_val) > 0.001:
                         print(f"      {k.replace('r_', '')}: {avg_val:.4f}")
             print("-" * 40)
-        if episode_num % 50 == 0:
+            
+            if C.USE_WANDB:
+                wandb.log({"episode/reward": episode_reward, "episode/avg": avg_reward}, step=total_steps)
+
+        if episode_num % C.SAVE_EVERY_EPISODES == 0:
             torch.save(agent.state_dict(), os.path.join(model_dir, "sac_run_checkpoint.pth"))
 
     env.close()

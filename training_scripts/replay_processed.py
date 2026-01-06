@@ -1,6 +1,6 @@
 # python replay_processed.py \
-#   --processed demonstrations/running_processed.npz \
-#   --demo demonstrations/running.npz \
+#   --processed demonstrations/walking_processed.npz \
+#   --demo demonstrations/walking.npz \
 #   --env LowerT1GoaliePenaltyKick-v0
 
 # Note that the processed videos suffer from "drift", 
@@ -89,7 +89,7 @@ def replay_processed_actions(file_path, demo_path, env_id, fps=50, debug=False):
     sim_data.qvel[-18:] = demo_data['qvel'][0][-18:]
     
     mujoco.mj_forward(model, sim_data)
-    action_function = get_action_function(env.action_space)
+    action_function = get_action_function()
     
     print("▶️  Starting Replay...")
     if debug:
