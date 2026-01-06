@@ -24,7 +24,7 @@ import run_config as C
 import run_rewards
 
 # --- Configuration ---
-DEFAULT_MODEL_PATH = "training_scripts/stand_models/sac_balance_checkpoint.pth"
+DEFAULT_MODEL_PATH = "training_scripts/run_models2/sac_run_checkpoint_astep.pth"
 DEFAULT_MODEL_TYPE = "sac" 
 DEFAULT_TASK_INDEX = 0
 DEFAULT_POLICY_CLIP = 0.35 
@@ -34,27 +34,22 @@ def get_mujoco_data(env):
     Robustly finds the MuJoCo 'data' object (containing qpos/qvel) 
     by digging through Gym/Gymnasium wrappers.
     """
-    # 1. Try standard unwrap
     if hasattr(env, "unwrapped"):
         if hasattr(env.unwrapped, "data"):
             return env.unwrapped.data
     
-    # 2. Recursive search for 'data' or 'physics' (dm_control)
     curr = env
-    for _ in range(10): # Depth limit
+    for _ in range(10): 
         if hasattr(curr, "data") and hasattr(curr.data, "qpos"):
             return curr.data
-        if hasattr(curr, "physics") and hasattr(curr.physics, "data"): # dm_control style
+        if hasattr(curr, "physics") and hasattr(curr.physics, "data"): 
             return curr.physics.data
-        if hasattr(curr, "sim") and hasattr(curr.sim, "data"): # Old gym style
+        if hasattr(curr, "sim") and hasattr(curr.sim, "data"): 
             return curr.sim.data
-        
-        # Go deeper
         if hasattr(curr, "env"):
             curr = curr.env
         else:
             break
-            
     return None
 
 def visualize():
@@ -71,7 +66,7 @@ def visualize():
     POLICY_CLIP = args.policy_clip
     RENDER_MODE = "human"
 
-    # 1. Initialize the Environment
+    # 1. Initialize Environment
     env_name = ENV_IDS[TASK_INDEX]
     print(f"Loading environment: {env_name}")
     
@@ -97,11 +92,14 @@ def visualize():
         # 3. Initialize Model
         dummy_obs, dummy_info = env.reset()
         dummy_info["task_index"] = TASK_INDEX
+        
+        # [CRITICAL UPDATE] Inject time for initial feature check (Phase Signal)
+        dummy_info["episode_time"] = 0.0
 
         processed_state = preprocessor.modify_state(dummy_obs, dummy_info)
         n_features = processed_state.shape[1]
 
-        print(f"Model Input Features: {n_features}")
+        print(f"Model Input Features: {n_features} (Includes Phase Signal)")
 
         if MODEL_TYPE.lower() == "sac":
             device = "cpu"
@@ -123,20 +121,19 @@ def visualize():
         except FileNotFoundError:
             print(f"Error: Model file {MODEL_PATH} not found!")
             return
+        except Exception as e:
+            print(f"Error loading model weights: {e}")
+            return
 
         # 5. Run Loop
         print("Starting visualization... Press Ctrl+C to stop.")
         
-        # --- ROBUST QPOS RETRIEVAL ---
         mj_data = get_mujoco_data(env)
         if mj_data is None:
             print("CRITICAL WARNING: Could not access MuJoCo data. Rewards will be broken.")
             qpos0 = np.zeros(12) 
         else:
-            # Capture the reset pose as the "Nominal Pose" (qpos0)
             env.reset()
-            # Usually qpos is [7 root + 12 joints]
-            # We assume the robot spawns in the ideal standing pose.
             full_qpos = mj_data.qpos.copy()
             qpos0 = full_qpos[7:] 
             print(f"Captured Nominal Pose (qpos0): {qpos0[:4]}...")
@@ -150,7 +147,6 @@ def visualize():
             prev_action = np.zeros(env.action_space.shape)
             prev_base_ang_vel = np.zeros(3)
             
-            # Reset history vars
             if mj_data:
                 prev_height = mj_data.qpos[2]
             else:
@@ -163,6 +159,9 @@ def visualize():
             step = 0
 
             while not done:
+                # [CRITICAL UPDATE] Inject time for Preprocessor to generate Phase Signal
+                info["episode_time"] = episode_time
+                
                 s = preprocessor.modify_state(obs, info).squeeze()
 
                 if MODEL_TYPE.lower() == "sac":

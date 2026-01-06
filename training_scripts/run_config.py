@@ -14,7 +14,7 @@ WARMUP_STEPS = 5000
 LOG_EVERY_EPISODES = 5
 LOG_WINDOW_EPISODES = 50
 SAVE_EVERY_EPISODES = 50     
-SAVE_EVERY_EPISODES_LONGER = 2000
+SAVE_EVERY_EPISODES_LONGER = 300
 USE_WANDB = False            
 
 # --- 3. REWARD WEIGHTS (Hybrid: DeepMind Stability + Your Shaping) ---
@@ -26,7 +26,7 @@ PHASE_W = 3.0
 ALIVE_W = 5.0                
 
 # B. DeepMind Regularization (The New Stabilizers)
-DOF_POS_W = 0.7              # Penalizes deviation from default "Standing Pose" (qpos0)
+DOF_POS_W = 1.0              # Penalizes deviation from default "Standing Pose" (qpos0)
 ORN_W = 1.0                  # Gravity alignment
 LIN_VEL_Z_W = 0.5            # Penalize vertical bouncing
 ANG_VEL_XY_W = 0.3           # Penalize body wobble
@@ -51,10 +51,11 @@ KNEE_BEND_W = 1.0
 # E. Height & Feet
 TARGET_HEIGHT = 0.62         
 HEIGHT_W = 3.0               
-FEET_AIR_TIME_W = 3.0        # Reward for lifting feet during swing
+FEET_AIR_TIME_W = 1.5       # Reward for lifting feet during swing
 
 # [DEEPMIND ADDITIONS] 
 # Added these so we can implement the full DeepMind logic in the next step.
+MAX_FOOT_HEIGHT = 0.12       # [FIX] Added missing constant (Target swing height in meters)
 FEET_PHASE_W = 1.0           # Rewards tracking the specific sine-wave arc (smooth landing)
 FEET_SLIP_W = -0.25          # Penalizes feet sliding on the ground (traction)
 
@@ -72,7 +73,7 @@ TARGET_VEL_X = 1.5
 LEAN_THRESHOLD = 0.6         
 
 # --- 5. CHECKPOINT ---
-CHECKPOINT_FILENAME = "sac_run_checkpoint_astep4.pth"
+CHECKPOINT_FILENAME = "sac_run_checkpoint_base1.pth"
 
 # --- 6. INDICES (Your Specific Mapping) ---
 HIP_PITCH_IDXS = [0, 6]      

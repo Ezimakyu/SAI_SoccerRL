@@ -163,8 +163,28 @@ class Preprocessor():
         ball_velr_robot = get_info_2d("ball_velr_rel_robot", 3)
         player_team = get_info_2d("player_team", 1)
 
-        # 4. Horizontal Stack
-        # 
+        # 4. [NEW] Phase Signal (DeepMind Input)
+        # We need 'episode_time' in info to calculate this. 
+        # If missing, it defaults to 0.0 (static phase).
+        gait_freq = 1.5 # Must match run_config.py
+        episode_time = 0.0
+        
+        if "episode_time" in info:
+            et = info["episode_time"]
+            try:
+                # Handle scalar or single-element array
+                episode_time = float(np.mean(et)) 
+            except:
+                episode_time = 0.0
+
+        phase = (episode_time * gait_freq) % 1.0
+        rads = phase * 2 * np.pi
+        
+        # DeepMind feeds [cos(phase), sin(phase)]
+        phase_signal = np.array([np.cos(rads), np.sin(rads)], dtype=np.float32)
+        phase_signal = np.tile(phase_signal, (batch_size, 1))
+
+        # 5. Horizontal Stack
         obs_final = np.hstack((
             robot_qpos, 
             robot_qvel,
@@ -187,7 +207,8 @@ class Preprocessor():
             target_xpos, 
             target_velp, 
             defender_xpos,
-            task_onehot
+            task_onehot,
+            phase_signal # <--- Added DeepMind Phase Signal
         ))
 
         return obs_final.astype(np.float32)

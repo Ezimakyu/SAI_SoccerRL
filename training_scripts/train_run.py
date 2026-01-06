@@ -1,7 +1,3 @@
-# NOTE THAT THE PREPROCESSED IMITATION LEARNING HAS A PADDING (doesn't include task id hotencoding)
-# Once we start training for all three tasks, will need to modify preprocessing 
-
-
 import os
 import glob
 import wandb
@@ -25,7 +21,7 @@ from main import Preprocessor, get_action_function, ENV_IDS, MultiTaskEnv
 USE_DEMONSTRATIONS = False
 BC_STEPS = 50000         
 BC_BATCH_SIZE = 256
-LOAD_CHECKPOINT = True   
+LOAD_CHECKPOINT = False   
 CHECKPOINT_FILENAME = C.CHECKPOINT_FILENAME # Pulled from Config
 
 # DEMO FILES
@@ -82,11 +78,11 @@ def load_demonstrations_to_buffer(buffer, file_paths):
             obs, actions, rewards = data['obs'], data['actions'], data['rewards']
             next_obs, dones = data['next_obs'], data['dones']
             
-            if obs.shape[1] == 87:
-                obs = np.hstack([obs, np.zeros((obs.shape[0], 1), dtype=np.float32)])
-            if next_obs.shape[1] == 87:
-                next_obs = np.hstack([next_obs, np.zeros((next_obs.shape[0], 1), dtype=np.float32)])
-
+            # Padding for new observation space size if necessary
+            # Note: Phase signal adds 2 dims, so 87 -> 89. Adjust logic as needed.
+            # For now, we assume demos might not be perfectly compatible with new Phase inputs 
+            # and might need retraining or robust loading. 
+            
             n_steps = min(len(obs), len(actions), len(rewards), len(next_obs), len(dones))
             for t in range(n_steps):
                 buffer.push(obs[t], actions[t], rewards[t], next_obs[t], dones[t])
@@ -119,13 +115,20 @@ def train_run():
     preprocessor = Preprocessor()
     dummy_obs, dummy_info = env.reset()
     
+    # Inject dummy time for initial dimension check
+    dummy_info["episode_time"] = 0.0
+    
     mj_model, mj_data = find_mujoco_objects(env)
     if mj_data is None:
         print("\nFATAL: Could not find MuJoCo data object.")
         return
     
     root_body_id = detect_root_body(mj_model, mj_data)
-    n_features = preprocessor.modify_state(dummy_obs, dummy_info).shape[1]
+    
+    # Check input dims with the new Phase Signal
+    processed_dummy = preprocessor.modify_state(dummy_obs, dummy_info)
+    n_features = processed_dummy.shape[1]
+    print(f"[Init] Model Input Features: {n_features} (Includes Phase Signal)")
     
     agent = SAC(
         n_features=n_features,
@@ -136,21 +139,26 @@ def train_run():
         device="mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"),
     )
 
-    model_dir = os.path.join(os.path.dirname(__file__), "run_models")
+    model_dir = os.path.join(os.path.dirname(__file__), "run_models2")
     os.makedirs(model_dir, exist_ok=True)
     
     resume_path = os.path.join(model_dir, CHECKPOINT_FILENAME)
     
     loaded_checkpoint = False
     if LOAD_CHECKPOINT and os.path.exists(resume_path):
-        agent.load_state_dict(torch.load(resume_path, map_location=agent.device))
-        print(f"[Init] Loaded Checkpoint from {CHECKPOINT_FILENAME}")
-        loaded_checkpoint = True
+        # We need to handle potential size mismatch if loading old checkpoint without Phase
+        try:
+            agent.load_state_dict(torch.load(resume_path, map_location=agent.device))
+            print(f"[Init] Loaded Checkpoint from {CHECKPOINT_FILENAME}")
+            loaded_checkpoint = True
+        except Exception as e:
+            print(f"[Init] Checkpoint load failed (likely architecture mismatch due to Phase Signal): {e}")
+            print("[Init] Starting Fresh with new architecture.")
+            loaded_checkpoint = False
     else:
         print("[Init] Starting Fresh.")
 
     replay_buffer = ReplayBuffer(C.REPLAY_SIZE)
-    # Corrected Action Function Call (No arguments)
     action_function = get_action_function()
 
     if USE_DEMONSTRATIONS and not loaded_checkpoint:
@@ -170,6 +178,10 @@ def train_run():
 
     while total_steps < C.TIMESTEPS:
         obs, info = env.reset()
+        
+        # [CRITICAL UPDATE] Inject time for Preprocessor Phase Signal
+        info["episode_time"] = 0.0 
+        
         state = preprocessor.modify_state(obs, info).squeeze()
         
         # --- INITIALIZE TRACKERS ---
@@ -182,10 +194,9 @@ def train_run():
         prev_base_ang_vel = state[27:30].copy()
         phase_offset = np.random.uniform(0.0, 1.0)
 
-        # Get initial height
         try: current_height = mj_data.xpos[root_body_id, 2]
         except: current_height = 0.62
-        prev_height = current_height # Initialize prev_height
+        prev_height = current_height 
 
         while not done:
             should_warmup = (not loaded_checkpoint) and (total_steps < C.WARMUP_STEPS) and (len(replay_buffer) == 0)
@@ -193,19 +204,21 @@ def train_run():
             action_clamped = np.clip(action, -C.POLICY_ACTION_CLIP, C.POLICY_ACTION_CLIP)
             
             next_obs, _, _, truncated, info = env.step(action_function(action_clamped))
+            
+            # [CRITICAL UPDATE] Pass time to Preprocessor for next_state
+            episode_steps += 1
+            info["episode_time"] = episode_steps * C.DT
+            
             next_state = preprocessor.modify_state(next_obs, info).squeeze()
 
-            # Update Current Height
             try: current_height = mj_data.xpos[root_body_id, 2]
             except: current_height = 0.62
 
-            # CALCULATE REWARD (Passing both current and previous height)
             reward, terminated, reason, stats = R.calculate_reward(
                 state, next_state, action_clamped, prev_action, qpos0, prev_base_ang_vel, 
                 episode_steps * C.DT, current_height, prev_height, phase_offset
             )
 
-            episode_steps += 1
             if episode_steps >= C.MAX_EPISODE_STEPS: truncated = True
             done = terminated or truncated
             if terminated: episode_reason = reason
@@ -220,10 +233,9 @@ def train_run():
                 for _ in range(C.UPDATES_PER_INTERVAL):
                     agent.update(*replay_buffer.sample(C.BATCH_SIZE))
 
-            # --- PREPARE FOR NEXT STEP ---
             state = next_state
             prev_action = action_clamped
-            prev_height = current_height # Update prev_height here
+            prev_height = current_height
             total_steps += 1
             pbar.update(1)
             if done: break
@@ -237,7 +249,6 @@ def train_run():
             torch.save(agent.state_dict(), os.path.join(model_dir, "sac_run_best.pth"))
 
         if episode_num % C.LOG_EVERY_EPISODES == 0:
-            # Replaced with Robust Print Block
             print(f"\nEp {episode_num} | Reward: {episode_reward:.2f} | Avg: {avg_reward:.2f} | Steps: {episode_steps} | Reason: {episode_reason}")
             if C.DEBUG_REWARDS and episode_steps > 0:
                 print("   [Rewards Breakdown]")
