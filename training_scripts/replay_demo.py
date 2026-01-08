@@ -1,6 +1,6 @@
 # Replay script for demonstrations
 
-# python replay_demo.py --data ./demonstrations/running.npz \
+# python replay_demo.py --data ./demonstrations/soccer_drill_run.npz \
 #     --env LowerT1GoaliePenaltyKick-v0 --speed 4
 
 import numpy as np

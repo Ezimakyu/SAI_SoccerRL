@@ -21,7 +21,7 @@ from main import Preprocessor, get_action_function, ENV_IDS, MultiTaskEnv
 USE_DEMONSTRATIONS = False
 BC_STEPS = 50000         
 BC_BATCH_SIZE = 256
-LOAD_CHECKPOINT = False   
+LOAD_CHECKPOINT = True   
 CHECKPOINT_FILENAME = C.CHECKPOINT_FILENAME # Pulled from Config
 
 # DEMO FILES
@@ -135,7 +135,7 @@ def train_run():
         action_space=env.action_space,
         log_std_min=-4.0,
         log_std_max=-0.5,
-        alpha=0.05, 
+        alpha=0.035, 
         device="mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"),
     )
 
@@ -216,7 +216,7 @@ def train_run():
 
             reward, terminated, reason, stats = R.calculate_reward(
                 state, next_state, action_clamped, prev_action, qpos0, prev_base_ang_vel, 
-                episode_steps * C.DT, current_height, prev_height, phase_offset
+                episode_steps * C.DT, current_height, prev_height, phase_offset, info
             )
 
             if episode_steps >= C.MAX_EPISODE_STEPS: truncated = True

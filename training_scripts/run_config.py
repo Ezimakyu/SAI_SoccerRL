@@ -14,68 +14,89 @@ WARMUP_STEPS = 5000
 LOG_EVERY_EPISODES = 5
 LOG_WINDOW_EPISODES = 50
 SAVE_EVERY_EPISODES = 50     
-SAVE_EVERY_EPISODES_LONGER = 300
+SAVE_EVERY_EPISODES_LONGER = 200
 USE_WANDB = False            
 
-# --- 3. REWARD WEIGHTS (Hybrid: DeepMind Stability + Your Shaping) ---
+# --- 3. REWARD WEIGHTS ---
+
+# [NEW] Knees Forward (Stop the twisting)
+# Penalize Hip Yaw if it rotates away from 0.0
+HIP_YAW_W = 3.0
+
+# [NEW] Momentum Builder
+# Rewards raw forward velocity linearly.
+# Helps the robot find the gradient to start moving from a standstill.
+FORWARD_MOMENTUM_W = 4.0
+
+# [NEW] KICKING & PRECISION WEIGHTS
+# 1. Approach: Reward getting closer to the ball (Guide rail)
+BALL_APPROACH_W = 2.0 
+
+# 2. Bulldozer: Reward raw ball velocity (Task 1/2)
+BALL_VEL_W = 1.0
+
+# 3. Precision: Reward ball moving TOWARDS the target (Task 3)
+# This is the "Sniper" reward. High payoff for accuracy.
+TARGET_PRECISION_W = 5.0
 
 # A. The Core Drivers
-TRACKING_VEL_W = 5.0         # Your aggressive velocity weight
-TRACKING_ANG_VEL_W = 1.0     # Penalize spinning
-PHASE_W = 3.0                
+TRACKING_VEL_W = 8.0         
+TRACKING_ANG_VEL_W = 2.0     
+PHASE_W = 4.0                
 ALIVE_W = 5.0                
 
-# B. DeepMind Regularization (The New Stabilizers)
-DOF_POS_W = 1.0              # Penalizes deviation from default "Standing Pose" (qpos0)
-ORN_W = 1.0                  # Gravity alignment
-LIN_VEL_Z_W = 0.5            # Penalize vertical bouncing
-ANG_VEL_XY_W = 0.3           # Penalize body wobble
+# B. DeepMind Regularization
+DOF_POS_W = 3.0              
+ORN_W = 1.0                  
+LIN_VEL_Z_W = 1.5            
+ANG_VEL_XY_W = 0.7           
 
-# C. Your "Anti-Zombie" Posture Shaping
-TARGET_FORWARD_TILT = 0.4    
+# C. Posture Shaping
+TARGET_FORWARD_TILT = 0.3
 FORWARD_TILT_W = 3.0         
-BACKWARD_TILT_PENALTY = 6.0  
-SIDE_TILT_PENALTY = 0.3      
+BACKWARD_TILT_PENALTY = 9.0  
+SIDE_TILT_PENALTY = 1.0      
 
-# D. Leg Configuration & Constraints
-TARGET_HIP_SPLIT = 0.6       
-SPLIT_STANCE_W = 3.0         
+# D. Leg Configuration
+TARGET_HIP_SPLIT = 0.7       
+SPLIT_STANCE_W = 4.0         
 
-# Explicit Splay Penalty
-HIP_SPLAY_PENALTY_W = -3.0   
+# [FIX] Replaced negative Splay penalty with positive Width target
+# This prevents the robot from crossing legs (tripping) by encouraging a 0.15 rad spread.
+STANCE_WIDTH_W = 2.0         
+TARGET_HIP_WIDTH = 0.30      
 
 # Stance Straightening
-STANCE_STRAIGHT_W = 1.0      
-KNEE_BEND_W = 1.0            
+STANCE_STRAIGHT_W = 0.1      
+KNEE_BEND_W = 3.0      
 
 # E. Height & Feet
-TARGET_HEIGHT = 0.62         
+TARGET_HEIGHT = 0.58         # Height is 0.62, a little less for allowing bend-down   
 HEIGHT_W = 3.0               
-FEET_AIR_TIME_W = 1.5       # Reward for lifting feet during swing
+FEET_AIR_TIME_W = 1.0        # Reward for lifting feet during swing
 
-# [DEEPMIND ADDITIONS] 
-# Added these so we can implement the full DeepMind logic in the next step.
-MAX_FOOT_HEIGHT = 0.12       # [FIX] Added missing constant (Target swing height in meters)
-FEET_PHASE_W = 1.0           # Rewards tracking the specific sine-wave arc (smooth landing)
-FEET_SLIP_W = -0.25          # Penalizes feet sliding on the ground (traction)
+# DeepMind Additions
+MAX_FOOT_HEIGHT = 0.12       
+FEET_PHASE_W = 5.0           
+FEET_SLIP_W = -0.25          
 
-# [NEW] Anti-Hopping: Heavy penalty if both feet are off ground (knees bent)
-DOUBLE_AIR_PENALTY_W = -10.0 
+# Anti-Hopping
+DOUBLE_AIR_PENALTY_W = -5.0 
 
-# F. Efficiency & Smoothness
+# F. Efficiency
 ENERGY_W = 0.005             
 ACTION_RATE_W = 0.2          
 
 # --- 4. GAIT & PHYSICS ---
-GAIT_FREQ = 1.5              
-PHASE_KNEE_AMPLITUDE = 1.4   
-TARGET_VEL_X = 1.5           
-LEAN_THRESHOLD = 0.6         
+GAIT_FREQ = 3.0               
+PHASE_KNEE_AMPLITUDE = 1.0   
+TARGET_VEL_X = 1.0           
+LEAN_THRESHOLD = 0.5         
 
 # --- 5. CHECKPOINT ---
-CHECKPOINT_FILENAME = "sac_run_checkpoint_base1.pth"
+CHECKPOINT_FILENAME = "sac_run_checkpoint_base7.pth"
 
-# --- 6. INDICES (Your Specific Mapping) ---
+# --- 6. INDICES ---
 HIP_PITCH_IDXS = [0, 6]      
 HIP_ROLL_IDXS  = [1, 7]      
 HIP_YAW_IDXS   = [2, 8]      
@@ -86,4 +107,4 @@ POLICY_ACTION_CLIP = 1.0
 DEBUG_REWARDS = True
 
 # --- 8. PENALTIES ---
-BACKWARDS_PENALTY_W = -3.0
+BACKWARDS_PENALTY_W = -6.0

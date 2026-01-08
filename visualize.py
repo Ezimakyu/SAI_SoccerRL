@@ -24,7 +24,8 @@ import run_config as C
 import run_rewards
 
 # --- Configuration ---
-DEFAULT_MODEL_PATH = "training_scripts/run_models2/sac_run_checkpoint_astep.pth"
+# DEFAULT_MODEL_PATH = "training_scripts/run_models2/sac_run_checkpoint.pth"
+DEFAULT_MODEL_PATH = "training_scripts/run_models_imitate/sac_imitate_checkpoint.pth"
 DEFAULT_MODEL_TYPE = "sac" 
 DEFAULT_TASK_INDEX = 0
 DEFAULT_POLICY_CLIP = 0.35 
@@ -189,7 +190,8 @@ def visualize():
                     episode_time=episode_time,
                     true_height=true_height,
                     prev_height=prev_height,
-                    phase_offset=phase_offset
+                    phase_offset=phase_offset,
+                    info=info
                 )
 
                 for k, v in stats.items():
